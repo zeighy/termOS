@@ -34,6 +34,8 @@ BASE=$base
 ROT=0
 # 1 = follow the accelerometer, 0 = keep the screen where it is
 AUTO=1
+# Set to 180 if auto-rotate shows the screen upside down
+SENSOR_OFFSET=0
 CONF
 fi
 

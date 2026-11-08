@@ -94,6 +94,7 @@ the screen then auto-rotates. Settings are in `~/.config/termos/display.conf`:
 ```sh
 BASE=90   # if the screen is upside down after first login, change 90 <-> 270
 AUTO=1    # 0 = never auto-rotate
+SENSOR_OFFSET=180   # add this if auto-rotate turns the screen upside down
 ```
 
 Tapping ⟳ rotates by 90° and turns auto-rotate off. Use the desktop menu →
