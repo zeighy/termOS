@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <openbox_menu>
   <menu id="root-menu" label="termOS">
+    <item label="All apps"><action name="Execute" command="termos-apps" /></item>
     <item label="Terminal"><action name="Execute" command="foot" /></item>
     <item label="Browser"><action name="Execute" command="chromium" /></item>
     <item label="Files"><action name="Execute" command="thunar" /></item>
@@ -12,8 +13,9 @@
       <item label="Auto-rotate on"><action name="Execute" command="termos-rotate auto" /></item>
       <item label="Auto-rotate off"><action name="Execute" command="termos-rotate lock" /></item>
     </menu>
+    <item label="Settings"><action name="Execute" command="termos-settings" /></item>
     <item label="Wi-Fi settings (text)"><action name="Execute" command="foot -e nmtui" /></item>
-    <item label="Update system"><action name="Execute" command="foot -e sh -c 'sudo pacman -Syu; echo; read -rp \"Press Enter to close\"'" /></item>
+    <item label="Update system"><action name="Execute" command="foot -T 'termOS update' -e termos-update" /></item>
     <separator />
     <menu id="power-menu" label="Power">
       <item label="Suspend"><action name="Execute" command="systemctl suspend" /></item>

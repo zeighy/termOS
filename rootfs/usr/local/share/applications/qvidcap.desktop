@@ -1,0 +1,6 @@
+[Desktop Entry]
+# termOS: hidden from the apps tray (helper/developer tool)
+Type=Application
+Name=qvidcap
+Exec=true
+NoDisplay=true

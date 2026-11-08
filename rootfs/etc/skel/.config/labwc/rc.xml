@@ -17,6 +17,8 @@
        screen is rotated. termos-display-setup replaces TERMOS_PANEL with the
        real output name (eDP-1, DSI-1, ...) on first login. -->
   <touch mapToOutput="TERMOS_PANEL" mouseEmulation="no" />
+  <!-- Pen (e.g. Lenovo Tablet 10 AES pen): mapped the same way so it follows rotation. -->
+  <tablet mapToOutput="TERMOS_PANEL" />
 
   <libinput>
     <device category="touchpad">
@@ -26,10 +28,11 @@
   </libinput>
 
   <windowRules>
-    <!-- Main apps open maximized: friendlier on a 10" touch screen. -->
-    <windowRule identifier="foot"><action name="Maximize" /></windowRule>
-    <windowRule identifier="chromium"><action name="Maximize" /></windowRule>
-    <windowRule identifier="org.remmina.Remmina"><action name="Maximize" /></windowRule>
+    <!-- App windows open maximized, so they shrink above the on-screen
+         keyboard instead of being covered by it. Dialogs are not affected.
+         Toggled by Settings > Display > "Open apps full-screen"
+         (see termos-apply-settings). -->
+    <windowRule identifier="*" type="normal"><action name="Maximize" /></windowRule><!-- termos-maximize -->
   </windowRules>
 
   <keyboard>
@@ -39,6 +42,8 @@
     <keybind key="W-b"><action name="Execute" command="chromium" /></keybind>
     <keybind key="W-e"><action name="Execute" command="thunar" /></keybind>
     <keybind key="W-r"><action name="Execute" command="remmina" /></keybind>
+    <keybind key="W-a"><action name="Execute" command="termos-apps" /></keybind>
+    <keybind key="W-i"><action name="Execute" command="termos-settings" /></keybind>
     <keybind key="W-k"><action name="Execute" command="termos-osk toggle" /></keybind>
     <keybind key="W-q"><action name="Close" /></keybind>
     <keybind key="W-Up"><action name="ToggleMaximize" /></keybind>

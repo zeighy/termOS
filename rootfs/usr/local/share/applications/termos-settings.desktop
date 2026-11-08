@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Settings
+Comment=termOS display, sound, wallpaper, network and system settings
+Exec=termos-settings
+Icon=preferences-system
+Categories=Settings;System;

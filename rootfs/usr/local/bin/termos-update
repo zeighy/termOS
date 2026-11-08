@@ -1,0 +1,72 @@
+#!/bin/bash
+# termOS updater: updates all Arch packages, then pulls the latest termOS
+# scripts/configs from GitHub and installs any newly added packages.
+#
+# First time on an older install:
+#   bash <(curl -fsSL https://raw.githubusercontent.com/zeighy/termOS/main/rootfs/usr/local/bin/termos-update)
+set -euo pipefail
+TERMOS_REPO=zeighy/termOS
+TERMOS_BRANCH=main
+[ -r /etc/termos/source ] && . /etc/termos/source
+
+say() { printf '\e[1;32m==>\e[0m %s\n' "$*"; }
+die() { printf '\e[1;31mERROR:\e[0m %s\n' "$*" >&2; exit 1; }
+pause() { [ -t 0 ] && read -rp "Press Enter to close" _ || true; }
+trap 'echo; echo "Update failed."; pause' ERR
+[[ $EUID -ne 0 ]] || die "run as your normal user (it uses sudo when needed)"
+
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+
+say "Updating Arch packages"
+sudo pacman -Syu
+
+say "Fetching termOS ($TERMOS_REPO, $TERMOS_BRANCH)"
+sha=$(curl -fsSL -H 'Accept: application/vnd.github.sha' \
+      "https://api.github.com/repos/$TERMOS_REPO/commits/$TERMOS_BRANCH")
+[[ $sha =~ ^[0-9a-f]{40}$ ]] || die "could not look up latest version"
+curl -fsSL "https://codeload.github.com/$TERMOS_REPO/tar.gz/$sha" | tar -xz -C "$tmp" --strip-components=1
+src="$tmp/rootfs"
+[ -d "$src" ] && [ -f "$tmp/packages.x86_64" ] || die "download looks incomplete"
+
+say "Installing packages added to termOS"
+mapfile -t pkgs < <(grep -Ev '^\s*(#|$)' "$tmp/packages.x86_64")
+missing=()
+for p in "${pkgs[@]}"; do pacman -Qq "$p" >/dev/null 2>&1 || missing+=("$p"); done
+if (( ${#missing[@]} )); then sudo pacman -S --needed "${missing[@]}"; else echo "    none"; fi
+
+say "Installing system files"
+while IFS= read -r -d '' f; do
+    rel=${f#"$src"/}
+    case $rel in
+        etc/skel/*) continue ;;
+        etc/sudoers.d/*)
+            sudo visudo -cqf "$f" >/dev/null || { echo "    skipping invalid $rel"; continue; }
+            sudo install -Dm440 "$f" "/$rel" ;;
+        usr/local/bin/*) sudo install -Dm755 "$f" "/$rel" ;;
+        etc/systemd/logind.conf.d/termos.conf)
+            # keep the user's chosen power-button action
+            [ -f "/$rel" ] && continue
+            sudo install -Dm644 "$f" "/$rel" ;;
+        *) sudo install -Dm644 "$f" "/$rel" ;;
+    esac
+done < <(find "$src" -type f -print0)
+echo "$(date +%Y.%m.%d) (${sha:0:7})" | sudo tee /etc/termos/version >/dev/null
+
+say "Updating your desktop configuration"
+backup="$HOME/.config/termos/backup-$(date +%Y%m%d-%H%M%S)"
+changed=0
+while IFS= read -r -d '' f; do
+    rel=${f#"$src/etc/skel/"}
+    dest="$HOME/$rel"
+    sudo install -Dm644 "$f" "/etc/skel/$rel"
+    if [ -f "$dest" ] && ! cmp -s "$f" "$dest"; then
+        install -Dm644 "$dest" "$backup/$rel"
+        changed=1
+    fi
+    install -Dm644 "$f" "$dest"
+done < <(find "$src/etc/skel" -type f -print0)
+[ "$changed" = 1 ] && echo "    previous versions saved in $backup"
+
+say "Done. termOS is now $(cat /etc/termos/version)."
+echo "Restart the desktop to load the changes: tap the desktop > Power > Restart desktop."
+pause

@@ -1,0 +1,21 @@
+#!/bin/bash
+# termOS: tap-friendly volume.
+#   termos-volume cycle   25 -> 50 -> 75 -> 100 -> muted -> 25 ...
+#   termos-volume mute    toggle mute
+sink=@DEFAULT_SINK@
+case "${1:-cycle}" in
+    mute) pactl set-sink-mute "$sink" toggle ;;
+    cycle)
+        muted=$(pactl get-sink-mute "$sink" | awk '{print $2}')
+        cur=$(pactl get-sink-volume "$sink" | grep -o '[0-9]\+%' | head -n1 | tr -d %)
+        if [ "$muted" = yes ]; then
+            pactl set-sink-mute "$sink" 0; pactl set-sink-volume "$sink" 25%
+            exit 0
+        fi
+        for l in 25 50 75 100; do
+            if [ "${cur:-0}" -lt "$l" ]; then
+                pactl set-sink-volume "$sink" "$l%"; exit 0
+            fi
+        done
+        pactl set-sink-mute "$sink" 1 ;;
+esac

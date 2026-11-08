@@ -28,6 +28,7 @@ AIR=$PROFILE/airootfs
 install -Dm755 "$SRC/installer/termos-install" "$AIR/usr/local/bin/termos-install"
 mkdir -p "$AIR/opt/termos"
 cp "$SRC/packages.x86_64" "$AIR/opt/termos/"
+echo "${TERMOS_VERSION:-dev}" > "$AIR/opt/termos/version"
 cp -a "$SRC/rootfs" "$AIR/opt/termos/rootfs"
 cat >> "$AIR/etc/motd" <<'MOTD'
 

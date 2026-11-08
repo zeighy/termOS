@@ -20,6 +20,10 @@ sudo pacman -Syu
 | File manager      | `thunar` (+ `gvfs` for USB drives / trash)   |
 | Remote desktop    | `remmina` with RDP (`freerdp`) and VNC       |
 | On-screen keyboard| `squeekboard` (off until you tap ⌨)          |
+| Apps tray         | `nwg-drawer` (Papirus icons)                 |
+| Text / images     | `mousepad`, `ristretto`                      |
+| Video / music     | `mpv`, `parole`                              |
+| Settings          | `termos-settings` (GTK3, touch-friendly)     |
 | Network           | NetworkManager + tray applet (`nmtui` too)   |
 | Boot              | systemd-boot, systemd initramfs, auto-login  |
 | Memory            | zram swap (compressed RAM)                   |
@@ -72,15 +76,20 @@ prompt.
 
 ## Using it
 
-* **Panel buttons** (single tap): Terminal, Browser, Files, Remote, then
-  open windows, Wi-Fi tray icon, ⌨ keyboard, ⟳ rotate, brightness (tap
-  cycles 100/70/40/15 %), volume (tap mutes), battery, clock, ⏻ power
-  (tap to reveal Sleep / Restart / Shut down).
+* **Panel buttons** (single tap): **Apps** (full-screen app tray), Terminal,
+  Browser, Files, Remote, then open windows, Wi-Fi tray icon, ⚙ Settings,
+  ⌨ keyboard, ⟳ rotate, brightness (tap cycles 100/70/40/15 %), volume (tap
+  cycles 25/50/75/100 %/mute; right-click opens sound settings), battery,
+  clock, ⏻ power (tap to reveal Sleep / Restart / Shut down).
 * **Tap the empty desktop** for a menu with the same apps plus display, Wi-Fi,
   "Update system" and power options.
-* **Keyboard shortcuts**: `Super+Enter` or `Ctrl+Alt+T` terminal, `Super+B`
-  browser, `Super+E` files, `Super+R` Remmina, `Super+K` on-screen keyboard,
-  `Super+Q` close window, `Super+Space` menu.
+* **Keyboard shortcuts**: `Super+A` apps, `Super+Enter` or `Ctrl+Alt+T`
+  terminal, `Super+B` browser, `Super+E` files, `Super+R` Remmina, `Super+I`
+  settings, `Super+K` on-screen keyboard, `Super+Q` close window,
+  `Super+Space` menu.
+* **App windows open maximized.** When the on-screen keyboard appears they
+  shrink to fit above it, so text boxes at the bottom stay visible. Turn
+  this off in Settings › Display › *Open apps full-screen*.
 * **Power button**: a short press suspends; holding it powers off.
 * A text console is on `Ctrl+Alt+F2`.
 
@@ -100,12 +109,50 @@ SENSOR_OFFSET=180   # add this if auto-rotate turns the screen upside down
 Tapping ⟳ rotates by 90° and turns auto-rotate off. Use the desktop menu →
 Display → *Auto-rotate on* to re-enable it.
 
+### Settings app
+
+Tap ⚙ in the panel, or open *Settings* from the apps tray.
+
+| Page      | What you can change |
+|-----------|---------------------|
+| Display   | brightness, display size (100–200 %), auto-rotate, rotate, flip auto-rotate, open apps full-screen |
+| Sound     | volume, mute |
+| Wallpaper | built-in or own pictures (`~/Pictures/Wallpapers`), any image, or a plain colour |
+| Keyboard  | hardware keyboard layout, show/hide on-screen keyboard |
+| Network   | Wi-Fi connections, IP address, SSH server on/off |
+| System    | hostname, timezone, power-button action, update, device info |
+
+Settings that need admin rights (SSH server, hostname, timezone and
+power button) go through `/usr/local/bin/termos-root-helper`. sudo
+allows the wheel group to run only that script without a password, and
+the script accepts only those specific, validated commands.
+
 ### On-screen keyboard
 
 Squeekboard does not run until you first tap ⌨ (or press `Super+K`), so
 it uses no memory when you type on the keyboard cover. Tapping ⌨ again
 hides it. For terminal keys (Ctrl, Esc, Tab, arrows), switch to its
 *Terminal* layout with the layout key on the keyboard.
+
+## Updating
+
+*Settings › System › Update now* (or *Update system* in the desktop menu)
+runs `termos-update`, which:
+
+1. runs `sudo pacman -Syu` (all Arch packages),
+2. downloads the latest termOS scripts/configs from this GitHub repo,
+3. installs any packages newly added to `packages.x86_64`,
+4. refreshes your desktop config files, saving any you changed in
+   `~/.config/termos/backup-<date>/`.
+
+Your settings (`~/.config/termos/*.conf`) are kept. Restart the desktop
+afterwards: tap the desktop › Power › Restart desktop.
+
+Devices installed before `termos-update` existed can get it once with:
+
+```sh
+bash <(curl -fsSL https://raw.githubusercontent.com/zeighy/termOS/main/rootfs/usr/local/bin/termos-update)
+```
 
 ## Repo layout
 
@@ -114,10 +161,13 @@ build.sh                    host-side build wrapper (docker)
 build/container-build.sh    runs in the Arch container: offline repo + mkarchiso
 installer/termos-install    the installer (copied into the live ISO)
 packages.x86_64             packages installed on the target
+artwork/                    wallpaper source (SVG)
 rootfs/                     copied onto the installed system
   etc/...                   zram, logind, journald, polkit, sudoers
   etc/skel/...              labwc, waybar, foot, chromium, gtk configs
-  usr/local/bin/termos-*    session, rotation, keyboard, brightness helpers
+  usr/local/bin/termos-*    session, settings, update, rotation, keyboard, volume helpers
+  usr/local/share/          app-tray entries (Settings, Update) and hidden clutter
+  usr/share/backgrounds/    default wallpaper
 ```
 
 Files under `/etc/skel` are only copied into the user's home directory

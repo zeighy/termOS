@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=On-screen Keyboard
+Comment=Show or hide the on-screen keyboard
+Exec=termos-osk toggle
+Icon=input-keyboard
+Categories=Utility;Accessibility;

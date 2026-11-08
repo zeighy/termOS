@@ -1,0 +1,11 @@
+window {
+    background-color: rgba(17, 17, 27, 0.94);
+    color: #cdd6f4;
+}
+#searchbox { min-height: 44px; font-size: 16px; margin-top: 16px; }
+button, image { background: none; border: none; box-shadow: none; }
+button { padding: 12px; border-radius: 12px; color: #cdd6f4; font-size: 14px; }
+button:hover, button:focus { background-color: rgba(137, 180, 250, 0.18); }
+#category-button { margin: 0 10px; font-size: 15px; }
+#pinned-box { padding-bottom: 8px; border-bottom: 1px dotted #45475a; }
+#files-box { padding: 6px; border: 1px dotted #45475a; border-radius: 15px; }

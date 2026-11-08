@@ -163,7 +163,8 @@ sed -i 's/relatime/noatime/' "$MNT/etc/fstab"
 
 # termOS files (configs, skel, helper scripts)
 cp -a "$ROOTFS/." "$MNT/"
-chmod 0440 "$MNT/etc/sudoers.d/10-wheel"
+chmod 0440 "$MNT"/etc/sudoers.d/*
+cp "$TERMOS/version" "$MNT/etc/termos/version" 2>/dev/null || true
 chmod 0755 "$MNT"/usr/local/bin/termos-*
 
 # pacman mirror for updates (installed system uses the normal Arch repos)

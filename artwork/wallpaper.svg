@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2560" height="1600" viewBox="0 0 2560 1600">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#11111b"/>
+      <stop offset="0.55" stop-color="#1e1e2e"/>
+      <stop offset="1" stop-color="#232641"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#89b4fa" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#89b4fa" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="dots" width="40" height="40" patternUnits="userSpaceOnUse">
+      <circle cx="20" cy="20" r="1.6" fill="#cdd6f4" fill-opacity="0.07"/>
+    </pattern>
+    <linearGradient id="fade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#11111b" stop-opacity="0"/>
+      <stop offset="1" stop-color="#11111b" stop-opacity="0.55"/>
+    </linearGradient>
+  </defs>
+  <rect width="2560" height="1600" fill="url(#bg)"/>
+  <rect width="2560" height="1600" fill="url(#dots)"/>
+  <ellipse cx="1280" cy="800" rx="900" ry="700" fill="url(#glow)"/>
+  <!-- faint scanline arcs -->
+  <g fill="none" stroke="#89b4fa" stroke-opacity="0.07" stroke-width="2">
+    <circle cx="1280" cy="800" r="420"/>
+    <circle cx="1280" cy="800" r="560"/>
+    <circle cx="1280" cy="800" r="720"/>
+  </g>
+  <!-- prompt mark -->
+  <g transform="translate(1280 760)">
+    <rect x="-210" y="-150" width="420" height="300" rx="34" fill="#181825" fill-opacity="0.85"
+          stroke="#89b4fa" stroke-opacity="0.45" stroke-width="4"/>
+    <circle cx="-168" cy="-114" r="10" fill="#f38ba8" fill-opacity="0.8"/>
+    <circle cx="-136" cy="-114" r="10" fill="#f9e2af" fill-opacity="0.8"/>
+    <circle cx="-104" cy="-114" r="10" fill="#a6e3a1" fill-opacity="0.8"/>
+    <path d="M -120 -40 L -40 20 L -120 80" fill="none" stroke="#89b4fa" stroke-width="26"
+          stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="0" y="62" width="120" height="24" rx="6" fill="#cdd6f4" fill-opacity="0.9"/>
+  </g>
+  <text x="1280" y="1010" text-anchor="middle" font-family="DejaVu Sans" font-size="64"
+        font-weight="bold" letter-spacing="6" fill="#cdd6f4" fill-opacity="0.85">termOS</text>
+  <rect width="2560" height="1600" fill="url(#fade)"/>
+</svg>

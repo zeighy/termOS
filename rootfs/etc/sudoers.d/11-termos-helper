@@ -1,0 +1,2 @@
+# termOS Settings app: password-less access to a small, validated helper only.
+%wheel ALL=(root) NOPASSWD: /usr/local/bin/termos-root-helper

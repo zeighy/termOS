@@ -1,5 +1,5 @@
 # termOS session autostart (runs once when labwc starts)
-swaybg -c '#1e1e2e' >/dev/null 2>&1 &
+termos-apply-settings >/dev/null 2>&1 &
 waybar >/dev/null 2>&1 &
 nm-applet --indicator >/dev/null 2>&1 &
 termos-display-setup >/dev/null 2>&1 &

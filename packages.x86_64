@@ -52,6 +52,16 @@ wl-clipboard
 wlr-randr
 iio-sensor-proxy
 brightnessctl
+nwg-drawer
+papirus-icon-theme
+python-gobject
+
+# --- everyday apps ---
+mousepad
+ristretto
+mpv
+parole
+gst-libav
 
 # --- audio ---
 pipewire

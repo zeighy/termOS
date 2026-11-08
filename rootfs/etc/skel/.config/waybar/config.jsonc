@@ -5,14 +5,15 @@
     "height": 42,
     "spacing": 2,
     "modules-left": [
-        "custom/term", "custom/web", "custom/files", "custom/remote",
+        "custom/apps", "custom/term", "custom/web", "custom/files", "custom/remote",
         "wlr/taskbar"
     ],
     "modules-right": [
-        "tray", "custom/osk", "custom/rotate", "backlight",
+        "tray", "custom/settings", "custom/osk", "custom/rotate", "backlight",
         "pulseaudio", "battery", "clock", "group/power"
     ],
 
+    "custom/apps":   { "format": "Apps",     "on-click": "termos-apps", "tooltip": false },
     "custom/term":   { "format": "Terminal", "on-click": "foot",     "tooltip": false },
     "custom/web":    { "format": "Browser",  "on-click": "chromium", "tooltip": false },
     "custom/files":  { "format": "Files",    "on-click": "thunar",   "tooltip": false },
@@ -27,6 +28,7 @@
 
     "tray": { "icon-size": 22, "spacing": 8 },
 
+    "custom/settings": { "format": "⚙", "on-click": "termos-settings", "tooltip-format": "Settings" },
     "custom/osk":    { "format": "⌨", "on-click": "termos-osk toggle", "tooltip-format": "On-screen keyboard" },
     "custom/rotate": { "format": "⟳", "on-click": "termos-rotate cw",  "tooltip-format": "Rotate screen (turns auto-rotate off)" },
 
@@ -39,7 +41,8 @@
     "pulseaudio": {
         "format": "🔊 {volume}%",
         "format-muted": "🔇",
-        "on-click": "pactl set-sink-mute @DEFAULT_SINK@ toggle",
+        "on-click": "termos-volume cycle",
+        "on-click-right": "termos-settings sound",
         "on-scroll-up": "pactl set-sink-volume @DEFAULT_SINK@ +5%",
         "on-scroll-down": "pactl set-sink-volume @DEFAULT_SINK@ -5%"
     },

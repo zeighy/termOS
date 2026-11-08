@@ -13,11 +13,12 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 mkdir -p out .work
+TERMOS_VERSION="$(date +%Y.%m.%d) ($(git rev-parse --short HEAD 2>/dev/null || echo dev))"
 docker pull -q archlinux:latest >/dev/null
 docker run --rm --privileged \
     -v "$PWD":/src:ro \
     -v "$PWD/out":/out \
     -v "$PWD/.work":/work \
-    -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+    -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" -e TERMOS_VERSION="$TERMOS_VERSION" \
     archlinux:latest bash /src/build/container-build.sh
 rmdir .work 2>/dev/null || true

@@ -21,7 +21,7 @@ apply_later() {
 apply() {
     local deg=$(( (BASE + ROT) % 360 )) t
     case $deg in 0) t=normal ;; *) t=$deg ;; esac
-    wlr-randr --output "$PANEL" --transform "$t"
+    wlr-randr --output "$PANEL" --transform "$t" --scale "${SCALE:-1}"
 }
 daemon_running() {
     [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null

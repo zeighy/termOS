@@ -1,0 +1,54 @@
+#!/bin/bash
+# termOS: apply user settings from ~/.config/termos/settings.conf
+#   termos-apply-settings [all|wallpaper|windows|keyboard]
+# Run at login (labwc autostart) and by termos-settings.
+conf="$HOME/.config/termos/settings.conf"
+WALLPAPER=/usr/share/backgrounds/termos/default.png
+WALLPAPER_COLOR=""
+MAXIMIZE=1
+KEYBOARD_LAYOUT=""
+[ -f "$conf" ] && . "$conf"
+rc="$HOME/.config/labwc/rc.xml"
+envf="$HOME/.config/labwc/environment"
+reconf=0
+
+wallpaper() {
+    pkill -u "$USER" -x swaybg
+    if [ -n "$WALLPAPER_COLOR" ]; then
+        setsid -f swaybg -c "$WALLPAPER_COLOR" >/dev/null 2>&1
+    elif [ -f "$WALLPAPER" ]; then
+        setsid -f swaybg -i "$WALLPAPER" -m fill -c '#1e1e2e' >/dev/null 2>&1
+    else
+        setsid -f swaybg -c '#1e1e2e' >/dev/null 2>&1
+    fi
+}
+
+windows() {
+    # The rule line in rc.xml carries a termos-maximize marker; switch it
+    # between matching every normal window ("*") and matching nothing.
+    [ -f "$rc" ] || return 0
+    local want='*'; [ "$MAXIMIZE" = 1 ] || want='termos-maximize-off'
+    if ! grep -q "identifier=\"$want\" type=\"normal\".*termos-maximize" "$rc"; then
+        sed -i "/termos-maximize/s/identifier=\"[^\"]*\"/identifier=\"$want\"/" "$rc"
+        reconf=1
+    fi
+}
+
+keyboard() {
+    [ -n "$KEYBOARD_LAYOUT" ] || return 0
+    mkdir -p "${envf%/*}"; touch "$envf"
+    if ! grep -qx "XKB_DEFAULT_LAYOUT=$KEYBOARD_LAYOUT" "$envf"; then
+        sed -i '/^XKB_DEFAULT_LAYOUT=/d' "$envf"
+        echo "XKB_DEFAULT_LAYOUT=$KEYBOARD_LAYOUT" >> "$envf"
+        reconf=1
+    fi
+}
+
+case "${1:-all}" in
+    all) wallpaper; windows; keyboard ;;
+    wallpaper) wallpaper ;;
+    windows) windows ;;
+    keyboard) keyboard ;;
+esac
+if [ "$reconf" = 1 ] && [ -n "$LABWC_PID" ]; then labwc --reconfigure; fi
+exit 0
