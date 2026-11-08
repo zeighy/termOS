@@ -1,5 +1,10 @@
+# make the Wayland session visible to D-Bus/systemd-activated services
+# (notifications, on-screen keyboard, portals)
+dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE LABWC_PID
 # termOS session autostart (runs once when labwc starts)
 termos-apply-settings >/dev/null 2>&1 &
 waybar >/dev/null 2>&1 &
 nm-applet --indicator >/dev/null 2>&1 &
 termos-display-setup >/dev/null 2>&1 &
+termos-idle start >/dev/null 2>&1 &
+termos-battery-monitor >/dev/null 2>&1 &

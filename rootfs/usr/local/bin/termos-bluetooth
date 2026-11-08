@@ -1,0 +1,6 @@
+#!/bin/bash
+# termOS: open Bluetooth devices. Turns Bluetooth on and starts the blueman
+# applet first (it provides the pairing agent for PIN codes).
+rfkill unblock bluetooth 2>/dev/null
+pgrep -u "$USER" -f blueman-applet >/dev/null || setsid -f blueman-applet >/dev/null 2>&1
+exec blueman-manager

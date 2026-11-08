@@ -1,0 +1,6 @@
+[Desktop Entry]
+# termOS: hidden from the apps tray
+Type=Application
+Name=blueman
+Exec=true
+NoDisplay=true

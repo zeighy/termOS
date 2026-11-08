@@ -1,0 +1,15 @@
+#!/bin/bash
+# termOS: sign this device in to Tailscale; opens the login page in Chromium.
+echo "Starting Tailscale sign-in..."
+opened=0
+tailscale up 2>&1 | while IFS= read -r line; do
+    echo "$line"
+    if [ $opened = 0 ] && [[ $line =~ (https://login\.tailscale\.com/[^[:space:]]+) ]]; then
+        xdg-open "${BASH_REMATCH[1]}" >/dev/null 2>&1 &
+        opened=1
+        echo "(Opened the sign-in page in the browser.)"
+    fi
+done
+echo
+tailscale status 2>/dev/null | head -5
+read -rp "Press Enter to close"

@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Screenshot
+Comment=Save the screen to ~/Pictures/Screenshots
+Exec=termos-screenshot full
+Icon=applets-screenshooter
+Categories=Utility;Graphics;
+Actions=delay;area;
+
+[Desktop Action delay]
+Name=In 3 seconds
+Exec=termos-screenshot delay
+
+[Desktop Action area]
+Name=Select an area
+Exec=termos-screenshot area

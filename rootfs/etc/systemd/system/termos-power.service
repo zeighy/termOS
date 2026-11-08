@@ -1,0 +1,11 @@
+[Unit]
+Description=termOS power profile
+After=sysinit.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/termos-power-profile apply
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

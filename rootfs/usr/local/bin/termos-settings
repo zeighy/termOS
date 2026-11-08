@@ -101,6 +101,8 @@ def root_helper(*args):
 def label(text, css=None, xalign=0.0, wrap=False):
     lb = Gtk.Label(label=text, xalign=xalign)
     lb.set_line_wrap(wrap)
+    if wrap:
+        lb.set_max_width_chars(70)
     if css:
         lb.get_style_context().add_class(css)
     return lb
@@ -179,6 +181,7 @@ class Settings(Gtk.Window):
         self.add(hb)
 
         self.display_page()
+        self.power_page()
         self.sound_page()
         self.wallpaper_page()
         self.keyboard_page()
@@ -254,6 +257,138 @@ class Settings(Gtk.Window):
         row(b, "Open apps full-screen", maxi,
             "Apps fill the screen and shrink when the on-screen keyboard appears")
         self.stack.add_titled(sw, "display", "Display")
+
+    # ---- Power -----------------------------------------------------------
+    def power_page(self):
+        sw, b = page()
+        pconf = read_conf("/etc/termos/power.conf")
+        profile = pconf.get("PROFILE", "balanced")
+        active = pconf.get("ACTIVE", profile)
+
+        bat = None
+        for d in sorted(glob.glob("/sys/class/power_supply/*")):
+            try:
+                with open(os.path.join(d, "type")) as f:
+                    if f.read().strip() == "Battery":
+                        bat = d
+                        break
+            except OSError:
+                pass
+
+        def sysread(name, default=""):
+            try:
+                with open(os.path.join(bat, name)) as f:
+                    return f.read().strip()
+            except (OSError, TypeError):
+                return default
+
+        if bat:
+            section(b, "Battery")
+            text = f"{sysread('capacity', '?')} %  ·  {sysread('status', '?')}"
+            row(b, "Charge", label(text, "row-label", xalign=1.0))
+            full = sysread("energy_full") or sysread("charge_full")
+            design = sysread("energy_full_design") or sysread("charge_full_design")
+            if full and design and int(design) > 0:
+                row(b, "Battery health", label(f"{int(full) * 100 // int(design)} % of original capacity",
+                                               "row-label", xalign=1.0))
+
+        section(b, "Power mode")
+        modes = [("power-saver", "Battery saver",
+                  "Longest battery life. CPU stays at base speed (no turbo), lower graphics "
+                  "clock, maximum Wi-Fi and PCIe power saving. Apps feel slower."),
+                 ("balanced", "Balanced (recommended)",
+                  "Full speed in short bursts when needed, power saving the rest of the time."),
+                 ("performance", "Performance",
+                  "Always full speed, power saving off. Uses the battery fastest and runs warmer.")]
+        group = None
+        self.mode_buttons = {}
+
+        def set_mode(btn, key):
+            if not btn.get_active():
+                return
+            ok, err = root_helper("power", "set", key)
+            if not ok:
+                self.notify(f"Could not change power mode:\n{err}")
+        for key, title, desc in modes:
+            rb = Gtk.RadioButton.new_with_label_from_widget(group, title)
+            group = group or rb
+            rb.get_child().get_style_context().add_class("row-label")
+            rb.set_active(key == profile)
+            rb.connect("toggled", set_mode, key)
+            self.mode_buttons[key] = rb
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            box.pack_start(rb, False, False, 0)
+            d = label(desc, "row-sub", wrap=True)
+            d.set_margin_start(30)
+            box.pack_start(d, False, False, 0)
+            b.pack_start(box, False, False, 6)
+        if active != profile:
+            b.pack_start(label("Battery saver is on right now because the battery is low.",
+                               "row-sub", wrap=True), False, False, 0)
+
+        st = read_conf(SETTINGS_CONF)
+        if bat:
+            auto = Gtk.Switch(active=st.get("AUTO_SAVER", "1") == "1")
+            auto.connect("notify::active", lambda s, _p: write_conf(
+                SETTINGS_CONF, "AUTO_SAVER", "1" if s.get_active() else "0"))
+            level = Gtk.ComboBoxText()
+            for pct in ("10", "15", "20", "30", "50"):
+                level.append(pct, f"{pct} %")
+            level.set_active_id(st.get("SAVER_AT", "20") if st.get("SAVER_AT", "20") in
+                                ("10", "15", "20", "30", "50") else "20")
+            level.connect("changed", lambda c: write_conf(SETTINGS_CONF, "SAVER_AT", c.get_active_id()))
+            h = Gtk.Box(spacing=8)
+            h.pack_start(level, False, False, 0)
+            h.pack_start(auto, False, False, 0)
+            row(b, "Automatic battery saver", h,
+                "Switch to Battery saver below this level; back when plugged in")
+
+        section(b, "When not in use")
+
+        def idle_combo(key, default, choices):
+            c = Gtk.ComboBoxText()
+            for secs, text in choices:
+                c.append(str(secs), text)
+            cur = st.get(key, str(default))
+            c.set_active_id(cur if cur in [str(x) for x, _t in choices] else str(default))
+
+            def changed(cb):
+                write_conf(SETTINGS_CONF, key, cb.get_active_id())
+                spawn("termos-idle", "restart")
+            c.connect("changed", changed)
+            return c
+        never = (0, "Never")
+        mins = lambda *m: [(x * 60, f"{x} min") for x in m]  # noqa: E731
+        row(b, "Dim screen after", idle_combo("IDLE_DIM", 120, [never, (30, "30 s")] + mins(1, 2, 5, 10)))
+        row(b, "Turn screen off after", idle_combo("IDLE_OFF", 300, [never] + mins(1, 2, 5, 10, 30)))
+        if bat:
+            row(b, "Sleep on battery after", idle_combo("IDLE_SLEEP_BAT", 900, [never] + mins(5, 10, 15, 30, 60)),
+                "SSH sessions drop during sleep; mosh sessions reconnect")
+        row(b, "Sleep when plugged in after",
+            idle_combo("IDLE_SLEEP_AC", 0, [never] + mins(15, 30, 60, 120)))
+        b.pack_start(label("Video playback and the ☕ panel button keep the screen awake.",
+                           "row-sub", wrap=True), False, False, 4)
+
+        section(b, "Power button")
+        pk = Gtk.ComboBoxText()
+        for k, v in (("suspend", "Sleep"), ("poweroff", "Shut down"), ("ignore", "Do nothing")):
+            pk.append(k, v)
+        cur = "suspend"
+        try:
+            with open("/etc/systemd/logind.conf.d/termos.conf") as f:
+                m = re.search(r"^HandlePowerKey=(\w+)", f.read(), re.M)
+                cur = m.group(1) if m else cur
+        except OSError:
+            pass
+        pk.set_active_id(cur)
+
+        def set_pk(c):
+            ok, err = root_helper("powerkey", c.get_active_id())
+            if not ok:
+                self.notify(f"Could not change power button:\n{err}")
+        pk.connect("changed", set_pk)
+        row(b, "Short press", pk, "Holding the button always shuts down")
+        self.stack.add_titled(sw, "power", "Power")
 
     # ---- Sound -----------------------------------------------------------
     def sound_page(self):
@@ -411,6 +546,57 @@ class Settings(Gtk.Window):
         ssh.connect("notify::active", set_ssh)
         row(b, "SSH server", ssh,
             f"Allow logging in to this device with: ssh {os.environ.get('USER', 'user')}@<IP address>")
+        section(b, "Bluetooth")
+        rf = run("rfkill", "list", "bluetooth").stdout
+        if "Bluetooth" in rf or "hci" in rf:
+            bt = Gtk.Switch(active="Soft blocked: yes" not in rf)
+            bt.connect("notify::active", lambda s, _p: run(
+                "rfkill", "unblock" if s.get_active() else "block", "bluetooth"))
+            row(b, "Bluetooth", bt, "Turn off to save battery when not using Bluetooth devices")
+            btb = Gtk.Button(label="Devices…")
+            btb.connect("clicked", lambda _b: spawn("termos-bluetooth"))
+            row(b, "Bluetooth devices", btb, "Pair keyboards, mice and headphones")
+        else:
+            row(b, "Bluetooth", label("No Bluetooth adapter found", "row-sub", xalign=1.0))
+
+        section(b, "Tailscale (private network)")
+        ts_on = run("systemctl", "is-enabled", "tailscaled.service").stdout.strip() == "enabled"
+        ts_info = label("", "row-sub", xalign=1.0)
+
+        def ts_refresh():
+            if not ts_sw.get_active():
+                ts_info.set_text("off")
+                return
+            r = run("tailscale", "status", "--json")
+            try:
+                import json
+                j = json.loads(r.stdout)
+                state = j.get("BackendState", "?")
+                ips = ", ".join(j.get("Self", {}).get("TailscaleIPs", [])[:1])
+                ts_info.set_text(f"{state}{'  ·  ' + ips if ips else ''}")
+            except (ValueError, AttributeError):
+                ts_info.set_text("starting…")
+        ts_sw = Gtk.Switch(active=ts_on)
+        busy_ts = {"v": False}
+
+        def set_ts(s, _p):
+            if busy_ts["v"]:
+                return
+            ok, err = root_helper("tailscale", "on" if s.get_active() else "off")
+            if not ok:
+                busy_ts["v"] = True
+                s.set_active(not s.get_active())
+                busy_ts["v"] = False
+                self.notify(f"Could not change Tailscale:\n{err}")
+            ts_refresh()
+        ts_sw.connect("notify::active", set_ts)
+        row(b, "Tailscale", ts_sw, "Reach your machines from any network without opening ports")
+        login = Gtk.Button(label="Sign in…")
+        login.connect("clicked", lambda _b: spawn("foot", "-T", "Tailscale sign-in", "-e",
+                                                  "termos-tailscale-login"))
+        row(b, "Account", login, "Opens the Tailscale sign-in page in the browser")
+        row(b, "Status", ts_info)
+        ts_refresh()
         self.stack.add_titled(sw, "network", "Network")
 
     # ---- System ----------------------------------------------------------
@@ -455,26 +641,6 @@ class Settings(Gtk.Window):
         h.pack_start(tz, False, False, 0)
         h.pack_start(tzbtn, False, False, 0)
         row(b, "Timezone", h, "Type part of a city name, e.g. Toronto")
-
-        section(b, "Power")
-        pk = Gtk.ComboBoxText()
-        for k, v in (("suspend", "Sleep"), ("poweroff", "Shut down"), ("ignore", "Do nothing")):
-            pk.append(k, v)
-        cur = "suspend"
-        try:
-            with open("/etc/systemd/logind.conf.d/termos.conf") as f:
-                m = re.search(r"^HandlePowerKey=(\w+)", f.read(), re.M)
-                cur = m.group(1) if m else cur
-        except OSError:
-            pass
-        pk.set_active_id(cur)
-
-        def set_pk(c):
-            ok, err = root_helper("powerkey", c.get_active_id())
-            if not ok:
-                self.notify(f"Could not change power button:\n{err}")
-        pk.connect("changed", set_pk)
-        row(b, "Power button (short press)", pk, "Holding the button always shuts down")
 
         section(b, "Software")
         upd = Gtk.Button(label="Update now")

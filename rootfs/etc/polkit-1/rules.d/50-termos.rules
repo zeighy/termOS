@@ -1,4 +1,4 @@
-// Let the logged-in local user manage Wi-Fi and mount USB drives without a
+// Let the logged-in local user manage Wi-Fi, Bluetooth and USB drives without a
 // password prompt (there is no polkit agent in this minimal desktop).
 polkit.addRule(function(action, subject) {
     if (!subject.local || !subject.active || !subject.isInGroup("wheel"))
@@ -6,6 +6,7 @@ polkit.addRule(function(action, subject) {
     if (action.id.indexOf("org.freedesktop.NetworkManager.") == 0 ||
         action.id.indexOf("org.freedesktop.udisks2.filesystem-mount") == 0 ||
         action.id.indexOf("org.freedesktop.udisks2.eject-media") == 0 ||
-        action.id.indexOf("org.freedesktop.udisks2.power-off-drive") == 0)
+        action.id.indexOf("org.freedesktop.udisks2.power-off-drive") == 0 ||
+        action.id.indexOf("org.blueman.") == 0)
         return polkit.Result.YES;
 });

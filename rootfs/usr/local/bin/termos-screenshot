@@ -1,0 +1,12 @@
+#!/bin/bash
+# termOS screenshots -> ~/Pictures/Screenshots (also copied to the clipboard)
+#   termos-screenshot [full|area|delay]
+dir="$HOME/Pictures/Screenshots"; mkdir -p "$dir"
+file="$dir/screenshot-$(date +%Y%m%d-%H%M%S).png"
+case "${1:-full}" in
+    full)  sleep 0.4; grim "$file" ;;            # let the tapped menu/drawer close
+    delay) sleep 3; grim "$file" ;;
+    area)  geo=$(slurp) || exit 0; grim -g "$geo" "$file" ;;
+esac || exit 1
+wl-copy < "$file" 2>/dev/null
+notify-send -a termOS -i "$file" "Screenshot saved" "${file/#$HOME/~} (also copied)" 2>/dev/null

@@ -56,6 +56,21 @@ nwg-drawer
 papirus-icon-theme
 python-gobject
 
+# --- power, idle, notifications ---
+swayidle
+wlopm
+mako
+libnotify
+iw
+
+# --- extras ---
+grim
+slurp
+bluez
+bluez-utils
+blueman
+tailscale
+
 # --- everyday apps ---
 mousepad
 ristretto

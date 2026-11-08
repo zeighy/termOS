@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=SSH Hosts
+Comment=Connect to the hosts in ~/.ssh/config with one tap
+Exec=termos-ssh
+Icon=network-server
+Categories=Network;RemoteAccess;

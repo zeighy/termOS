@@ -1,0 +1,44 @@
+#!/bin/bash
+# termOS idle handling (swayidle): dim -> screen off -> sleep.
+#   termos-idle start|restart   (re)start swayidle with times from settings
+#   termos-idle dim|undim|maybe-sleep bat|ac   (internal, called by swayidle)
+# Settings (seconds, 0 = never) in ~/.config/termos/settings.conf:
+#   IDLE_DIM=120 IDLE_OFF=300 IDLE_SLEEP_BAT=900 IDLE_SLEEP_AC=0
+# Apps that play video (mpv, Chromium) block idle automatically, and the
+# panel's ☕ button keeps the screen on while enabled.
+conf="$HOME/.config/termos/settings.conf"
+IDLE_DIM=120; IDLE_OFF=300; IDLE_SLEEP_BAT=900; IDLE_SLEEP_AC=0
+[ -f "$conf" ] && . "$conf"
+saved="${XDG_RUNTIME_DIR:-/tmp}/termos-brightness"
+
+on_battery() {
+    local s
+    for s in /sys/class/power_supply/*; do
+        [ "$(cat "$s/type" 2>/dev/null)" = Battery ] || continue
+        [ "$(cat "$s/status" 2>/dev/null)" = Discharging ] && return 0
+    done
+    return 1
+}
+
+case "${1:-start}" in
+    start|restart)
+        pkill -u "$USER" -x swayidle
+        args=(-w)
+        [ "${IDLE_DIM:-0}" -gt 0 ] && args+=(timeout "$IDLE_DIM" "termos-idle dim" resume "termos-idle undim")
+        [ "${IDLE_OFF:-0}" -gt 0 ] && args+=(timeout "$IDLE_OFF" "wlopm --off '*'" resume "wlopm --on '*'")
+        [ "${IDLE_SLEEP_BAT:-0}" -gt 0 ] && args+=(timeout "$IDLE_SLEEP_BAT" "termos-idle maybe-sleep bat")
+        [ "${IDLE_SLEEP_AC:-0}" -gt 0 ] && args+=(timeout "$IDLE_SLEEP_AC" "termos-idle maybe-sleep ac")
+        args+=(before-sleep "termos-idle undim" after-resume "wlopm --on '*'")
+        setsid -f swayidle "${args[@]}" >/dev/null 2>&1 ;;
+    dim)
+        cur=$(brightnessctl -m 2>/dev/null | cut -d, -f3) || exit 0
+        [ -n "$cur" ] || exit 0
+        echo "$cur" > "$saved"
+        brightnessctl -q set 10% ;;
+    undim)
+        [ -f "$saved" ] && brightnessctl -q set "$(cat "$saved")" && rm -f "$saved" ;;
+    maybe-sleep)
+        if [ "$2" = bat ] && on_battery; then systemctl suspend; fi
+        if [ "$2" = ac ] && ! on_battery; then systemctl suspend; fi ;;
+esac
+exit 0

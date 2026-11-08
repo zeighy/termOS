@@ -1,0 +1,48 @@
+#!/bin/bash
+# termOS battery monitor (runs in the session):
+#  - low (15%) and critical (5%) battery notifications
+#  - automatic Battery saver below SAVER_AT % (if AUTO_SAVER=1), undone when
+#    the charger is connected
+conf="$HOME/.config/termos/settings.conf"
+pconf=/etc/termos/power.conf
+warned=0
+bat=""
+for s in /sys/class/power_supply/*; do
+    [ "$(cat "$s/type" 2>/dev/null)" = Battery ] && { bat=$s; break; }
+done
+[ -n "$bat" ] || exit 0       # desktop PC: nothing to do
+
+notify() { notify-send -a termOS "$@" 2>/dev/null; }
+helper() { sudo -n /usr/local/bin/termos-root-helper "$@" >/dev/null 2>&1; }
+
+while :; do
+    AUTO_SAVER=1; SAVER_AT=20
+    [ -f "$conf" ] && . "$conf"
+    PROFILE=balanced; ACTIVE=balanced
+    [ -r "$pconf" ] && . "$pconf"
+    cap=$(cat "$bat/capacity" 2>/dev/null || echo 100)
+    status=$(cat "$bat/status" 2>/dev/null)
+
+    if [ "$status" = Discharging ]; then
+        if [ "$AUTO_SAVER" = 1 ] && [ "$cap" -le "$SAVER_AT" ] && \
+           [ "$PROFILE" != power-saver ] && [ "$ACTIVE" != power-saver ]; then
+            helper power auto-saver && notify -i battery-low "Battery saver on" \
+                "Battery at ${cap}%. Performance is limited until you plug in."
+        fi
+        if [ "$cap" -le 5 ] && [ "$warned" -lt 2 ]; then
+            notify -u critical -i battery-caution "Battery critically low (${cap}%)" \
+                "Plug in now. Unsaved work may be lost."
+            warned=2
+        elif [ "$cap" -le 15 ] && [ "$warned" -lt 1 ]; then
+            notify -i battery-low "Battery low (${cap}%)" "Consider plugging in soon."
+            warned=1
+        fi
+    else
+        warned=0
+        if [ "$ACTIVE" != "$PROFILE" ]; then
+            helper power auto-off && notify -i battery-good-charging "Charging" \
+                "Back to your ${PROFILE/-/ } power mode."
+        fi
+    fi
+    sleep 60
+done

@@ -43,14 +43,17 @@ while IFS= read -r -d '' f; do
             sudo visudo -cqf "$f" >/dev/null || { echo "    skipping invalid $rel"; continue; }
             sudo install -Dm440 "$f" "/$rel" ;;
         usr/local/bin/*) sudo install -Dm755 "$f" "/$rel" ;;
-        etc/systemd/logind.conf.d/termos.conf)
-            # keep the user's chosen power-button action
+        etc/systemd/logind.conf.d/termos.conf|etc/termos/power.conf)
+            # keep the user's choices (power button, power mode)
             [ -f "/$rel" ] && continue
             sudo install -Dm644 "$f" "/$rel" ;;
         *) sudo install -Dm644 "$f" "/$rel" ;;
     esac
 done < <(find "$src" -type f -print0)
 echo "$(date +%Y.%m.%d) (${sha:0:7})" | sudo tee /etc/termos/version >/dev/null
+
+say "Enabling system services"
+sudo /usr/local/bin/termos-system-setup --now
 
 say "Updating your desktop configuration"
 backup="$HOME/.config/termos/backup-$(date +%Y%m%d-%H%M%S)"

@@ -5,22 +5,25 @@
     "height": 42,
     "spacing": 2,
     "modules-left": [
-        "custom/apps", "custom/term", "custom/web", "custom/files", "custom/remote",
+        "custom/apps", "custom/term", "custom/ssh", "custom/web", "custom/files", "custom/remote",
         "wlr/taskbar"
     ],
     "modules-right": [
-        "tray", "custom/settings", "custom/osk", "custom/rotate", "backlight",
+        "tray", "idle_inhibitor", "custom/settings", "custom/osk", "custom/rotate", "backlight",
         "pulseaudio", "battery", "clock", "group/power"
     ],
 
     "custom/apps":   { "format": "Apps",     "on-click": "termos-apps", "tooltip": false },
     "custom/term":   { "format": "Terminal", "on-click": "foot",     "tooltip": false },
+    "custom/ssh":    { "format": "SSH",      "on-click": "termos-ssh", "tooltip": false },
     "custom/web":    { "format": "Browser",  "on-click": "chromium", "tooltip": false },
     "custom/files":  { "format": "Files",    "on-click": "thunar",   "tooltip": false },
     "custom/remote": { "format": "Remote",   "on-click": "remmina",  "tooltip": false },
 
     "wlr/taskbar": {
-        "format": "{title:.18}",
+        "format": "{icon}",
+        "icon-size": 26,
+        "icon-theme": "Papirus-Dark",
         "on-click": "activate",
         "on-click-middle": "close",
         "tooltip-format": "{title}"
@@ -28,6 +31,12 @@
 
     "tray": { "icon-size": 22, "spacing": 8 },
 
+    "idle_inhibitor": {
+        "format": "{icon}",
+        "format-icons": { "activated": "☕", "deactivated": "☾" },
+        "tooltip-format-activated": "Keeping the screen awake",
+        "tooltip-format-deactivated": "Screen sleeps when idle"
+    },
     "custom/settings": { "format": "⚙", "on-click": "termos-settings", "tooltip-format": "Settings" },
     "custom/osk":    { "format": "⌨", "on-click": "termos-osk toggle", "tooltip-format": "On-screen keyboard" },
     "custom/rotate": { "format": "⟳", "on-click": "termos-rotate cw",  "tooltip-format": "Rotate screen (turns auto-rotate off)" },
@@ -49,6 +58,8 @@
     "battery": {
         "format": "🔋 {capacity}%",
         "format-charging": "⚡ {capacity}%",
+        "on-click": "termos-settings power",
+        "tooltip-format": "{timeTo}  ·  tap for power settings",
         "states": { "warning": 25, "critical": 10 }
     },
     "clock": { "format": "{:%H:%M}", "tooltip-format": "{:%A %d %B %Y}" },

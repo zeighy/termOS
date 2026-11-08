@@ -31,5 +31,30 @@ case "${1:-}" in
         case "${2:-}" in suspend|poweroff|ignore) ;; *) die "usage: powerkey suspend|poweroff|ignore" ;; esac
         sed -i "s/^HandlePowerKey=.*/HandlePowerKey=$2/" /etc/systemd/logind.conf.d/termos.conf
         systemctl kill -s HUP systemd-logind.service ;;
-    *) die "usage: ssh|hostname|timezone|powerkey ..." ;;
+    power)
+        conf=/etc/termos/power.conf
+        PROFILE=balanced; ACTIVE=balanced
+        [ -r "$conf" ] && . "$conf"
+        valid() { [[ $1 =~ ^(power-saver|balanced|performance)$ ]] || die "invalid profile"; }
+        case "${2:-}" in
+            set)        valid "${3:-}"; PROFILE=$3; ACTIVE=$3 ;;      # user choice
+            auto-saver) ACTIVE=power-saver ;;                        # low battery
+            auto-off)   ACTIVE=$PROFILE ;;                           # charging again
+            *) die "usage: power set <profile> | auto-saver | auto-off" ;;
+        esac
+        printf '# termOS power profile (managed by Settings > Power; applied at boot)\nPROFILE=%s\nACTIVE=%s\n' \
+            "$PROFILE" "$ACTIVE" > "$conf"
+        /usr/local/bin/termos-power-profile apply "$ACTIVE" ;;
+    tailscale)
+        u=${SUDO_USER:-}
+        case "${2:-}" in
+            on)  systemctl enable --now tailscaled.service
+                 for _ in 1 2 3 4 5 6 7 8 9 10; do tailscale status >/dev/null 2>&1 && break
+                     [ -S /run/tailscale/tailscaled.sock ] && break; sleep 0.5; done
+                 [[ $u =~ ^[a-z_][a-z0-9_-]*$ ]] && tailscale set --operator="$u" || true ;;
+            off) tailscale down 2>/dev/null || true
+                 systemctl disable --now tailscaled.service ;;
+            *) die "usage: tailscale on|off" ;;
+        esac ;;
+    *) die "usage: ssh|hostname|timezone|powerkey|power|tailscale ..." ;;
 esac

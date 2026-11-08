@@ -1,0 +1,6 @@
+[Desktop Entry]
+# termOS: hidden from the apps tray
+Type=Application
+Name=blueman-adapters
+Exec=true
+NoDisplay=true

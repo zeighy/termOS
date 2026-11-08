@@ -44,6 +44,9 @@
     <keybind key="W-r"><action name="Execute" command="remmina" /></keybind>
     <keybind key="W-a"><action name="Execute" command="termos-apps" /></keybind>
     <keybind key="W-i"><action name="Execute" command="termos-settings" /></keybind>
+    <keybind key="W-s"><action name="Execute" command="termos-ssh" /></keybind>
+    <keybind key="Print"><action name="Execute" command="termos-screenshot full" /></keybind>
+    <keybind key="S-Print"><action name="Execute" command="termos-screenshot area" /></keybind>
     <keybind key="W-k"><action name="Execute" command="termos-osk toggle" /></keybind>
     <keybind key="W-q"><action name="Close" /></keybind>
     <keybind key="W-Up"><action name="ToggleMaximize" /></keybind>

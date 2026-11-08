@@ -215,8 +215,7 @@ useradd -m -G wheel,video,input,audio -s /bin/bash "$USERNAME"
 passwd -l root >/dev/null
 mkinitcpio -P
 bootctl install --esp-path=/boot
-systemctl enable NetworkManager.service systemd-timesyncd.service fstrim.timer systemd-boot-update.service
-systemctl mask NetworkManager-wait-online.service
+/usr/local/bin/termos-system-setup
 EOF
 printf '%s:%s\n' "$USERNAME" "$PW1" | arch-chroot "$MNT" chpasswd
 unset PW1 PW2

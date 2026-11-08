@@ -1,0 +1,98 @@
+#!/bin/bash
+# termOS power profiles - applies real hardware limits (works on CPUs without
+# Intel HWP/EPP such as Gemini Lake, where power-profiles-daemon can't do much).
+#
+#   termos-power-profile apply [power-saver|balanced|performance]
+#   termos-power-profile status
+# Without a profile name, applies ACTIVE from /etc/termos/power.conf.
+# Every knob is optional: missing sysfs files are skipped silently.
+conf=/etc/termos/power.conf
+PROFILE=balanced; ACTIVE=""
+[ -r "$conf" ] && . "$conf"
+
+w() {   # write value to every existing, writable path matching the glob(s)
+    local val=$1; shift
+    local f
+    for f in "$@"; do [ -w "$f" ] && echo "$val" > "$f" 2>/dev/null; done
+    return 0
+}
+
+apply() {
+    local p=$1
+    local cpu=/sys/devices/system/cpu
+    local gov epp turbo aspm wifi writeback amd gpu_pct
+
+    case $p in
+        power-saver) gov=powersave;   epp=power;         turbo=0; aspm=powersupersave; wifi=on;  writeback=1500; amd=low;  gpu_pct=50 ;;
+        balanced)    gov=balanced;    epp=balance_power; turbo=1; aspm=powersave;      wifi=on;  writeback=500;  amd=auto; gpu_pct=100 ;;
+        performance) gov=performance; epp=performance;   turbo=1; aspm=default;        wifi=off; writeback=500;  amd=auto; gpu_pct=100 ;;
+        *) echo "unknown profile: $p" >&2; return 1 ;;
+    esac
+
+    # --- CPU governor: intel_pstate offers powersave/performance; others prefer schedutil
+    if [ "$gov" = balanced ]; then
+        if grep -qw schedutil $cpu/cpufreq/policy0/scaling_available_governors 2>/dev/null; then
+            gov=schedutil
+        else
+            gov=powersave
+        fi
+    fi
+    if [ "$gov" = powersave ] && ! grep -qw powersave $cpu/cpufreq/policy0/scaling_available_governors 2>/dev/null; then
+        gov=schedutil
+    fi
+    w "$gov" $cpu/cpufreq/policy*/scaling_governor
+    # --- Energy/performance hint (HWP Intel, amd-pstate-epp); must follow governor
+    w "$epp" $cpu/cpufreq/policy*/energy_performance_preference
+    # --- Turbo / boost
+    if [ -e $cpu/intel_pstate/no_turbo ]; then
+        w $(( 1 - turbo )) $cpu/intel_pstate/no_turbo
+        w 100 $cpu/intel_pstate/max_perf_pct
+    fi
+    w "$turbo" $cpu/cpufreq/boost $cpu/amd_pstate/cpb_boost
+    # --- Intel GPU max clock (i915), percentage of the RPn..RP0 range
+    local card min max
+    for card in /sys/class/drm/card[0-9]; do
+        if [ -r "$card/gt_RP0_freq_mhz" ]; then
+            min=$(cat "$card/gt_RPn_freq_mhz"); max=$(cat "$card/gt_RP0_freq_mhz")
+            w $(( min + (max - min) * gpu_pct / 100 )) "$card/gt_max_freq_mhz"
+        fi
+        for g in "$card"/device/tile*/gt*/freq0; do      # xe driver
+            [ -r "$g/rp0_freq" ] || continue
+            min=$(cat "$g/rpn_freq"); max=$(cat "$g/rp0_freq")
+            w $(( min + (max - min) * gpu_pct / 100 )) "$g/max_freq"
+        done
+        w "$amd" "$card/device/power_dpm_force_performance_level"   # amdgpu
+    done
+    # --- PCIe link power management (may be locked by firmware)
+    w "$aspm" /sys/module/pcie_aspm/parameters/policy
+    # --- Fewer disk wake-ups on battery saver
+    w "$writeback" /proc/sys/vm/dirty_writeback_centisecs
+    # --- Wi-Fi power saving: now, and for future connections
+    mkdir -p /etc/NetworkManager/conf.d
+    printf '[connection]\n# 3 = power saving on, 2 = off (set by termos-power-profile)\nwifi.powersave = %s\n' \
+        "$([ "$wifi" = on ] && echo 3 || echo 2)" > /etc/NetworkManager/conf.d/termos-wifi-powersave.conf
+    if command -v iw >/dev/null; then
+        local dev
+        for dev in /sys/class/net/*/wireless; do
+            dev=${dev%/wireless}; dev=${dev##*/}
+            iw dev "$dev" set power_save "$wifi" 2>/dev/null
+        done
+    fi
+    return 0
+}
+
+case "${1:-apply}" in
+    apply)
+        p=${2:-${ACTIVE:-$PROFILE}}
+        apply "$p" ;;
+    status)
+        echo "profile=$PROFILE active=${ACTIVE:-$PROFILE}"
+        echo "governor=$(cat /sys/devices/system/cpu/cpufreq/policy0/scaling_governor 2>/dev/null)"
+        echo "no_turbo=$(cat /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null)"
+        echo "epp=$(cat /sys/devices/system/cpu/cpufreq/policy0/energy_performance_preference 2>/dev/null)"
+        for c in /sys/class/drm/card[0-9]; do
+            [ -r "$c/gt_max_freq_mhz" ] && echo "gpu_max=$(cat $c/gt_max_freq_mhz)MHz (of $(cat $c/gt_RP0_freq_mhz))"
+        done
+        echo "aspm=$(grep -o '\[[a-z]*\]' /sys/module/pcie_aspm/parameters/policy 2>/dev/null)" ;;
+    *) echo "usage: termos-power-profile apply [power-saver|balanced|performance] | status" >&2; exit 1 ;;
+esac

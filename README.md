@@ -24,6 +24,10 @@ sudo pacman -Syu
 | Text / images     | `mousepad`, `ristretto`                      |
 | Video / music     | `mpv`, `parole`                              |
 | Settings          | `termos-settings` (GTK3, touch-friendly)     |
+| SSH hosts         | `termos-ssh` (one-tap hosts from `~/.ssh/config`, mosh option) |
+| Power             | `termos-power-profile` (saver / balanced / performance), `swayidle` + `wlopm` |
+| Notifications     | `mako`                                       |
+| Extras            | `grim`/`slurp` screenshots, `blueman`, `tailscale` |
 | Network           | NetworkManager + tray applet (`nmtui` too)   |
 | Boot              | systemd-boot, systemd initramfs, auto-login  |
 | Memory            | zram swap (compressed RAM)                   |
@@ -77,14 +81,16 @@ prompt.
 ## Using it
 
 * **Panel buttons** (single tap): **Apps** (full-screen app tray), Terminal,
-  Browser, Files, Remote, then open windows, Wi-Fi tray icon, ⚙ Settings,
+  SSH, Browser, Files, Remote, then open windows (as icons), Wi-Fi tray icon,
+  ☾/☕ keep-awake, ⚙ Settings,
   ⌨ keyboard, ⟳ rotate, brightness (tap cycles 100/70/40/15 %), volume (tap
   cycles 25/50/75/100 %/mute; right-click opens sound settings), battery,
-  clock, ⏻ power (tap to reveal Sleep / Restart / Shut down).
+  clock, ⏻ power (tap to reveal Sleep / Restart / Shut down). Tapping the
+  battery opens the Power settings.
 * **Tap the empty desktop** for a menu with the same apps plus display, Wi-Fi,
   "Update system" and power options.
-* **Keyboard shortcuts**: `Super+A` apps, `Super+Enter` or `Ctrl+Alt+T`
-  terminal, `Super+B` browser, `Super+E` files, `Super+R` Remmina, `Super+I`
+* **Keyboard shortcuts**: `Super+A` apps, `Super+S` SSH hosts, `Super+Enter`
+  or `Ctrl+Alt+T` terminal, `Super+B` browser, `Super+E` files, `Super+R` Remmina, `Super+I`
   settings, `Super+K` on-screen keyboard, `Super+Q` close window,
   `Super+Space` menu.
 * **App windows open maximized.** When the on-screen keyboard appears they
@@ -116,16 +122,57 @@ Tap ⚙ in the panel, or open *Settings* from the apps tray.
 | Page      | What you can change |
 |-----------|---------------------|
 | Display   | brightness, display size (100–200 %), auto-rotate, rotate, flip auto-rotate, open apps full-screen |
+| Power     | power mode, battery health, automatic battery saver, dim / screen-off / sleep timers, power button |
 | Sound     | volume, mute |
 | Wallpaper | built-in or own pictures (`~/Pictures/Wallpapers`), any image, or a plain colour |
 | Keyboard  | hardware keyboard layout, show/hide on-screen keyboard |
-| Network   | Wi-Fi connections, IP address, SSH server on/off |
-| System    | hostname, timezone, power-button action, update, device info |
+| Network   | Wi-Fi connections, IP address, SSH server, Bluetooth, Tailscale |
+| System    | hostname, timezone, update, device info |
 
 Settings that need admin rights (SSH server, hostname, timezone and
 power button) go through `/usr/local/bin/termos-root-helper`. sudo
 allows the wheel group to run only that script without a password, and
 the script accepts only those specific, validated commands.
+
+### Power modes
+
+`termos-power-profile` sets real hardware limits. This matters on CPUs
+like Gemini Lake, where the usual `power-profiles-daemon` can do very
+little.
+
+| | Battery saver | Balanced (default) | Performance |
+|---|---|---|---|
+| CPU | base clock, no turbo | turbo on demand, power-leaning hint | always full speed |
+| Intel/AMD GPU | max clock ~halfway | full | full |
+| PCIe link power saving | max (`powersupersave`) | on | off |
+| Wi-Fi power saving | on | on | off |
+| Disk write-back | every 15 s | every 5 s | every 5 s |
+
+The chosen mode is stored in `/etc/termos/power.conf` and applied at boot
+by `termos-power.service`. With *Automatic battery saver* on, termOS
+switches to Battery saver below the set level (20 % by default). It
+switches back to your chosen mode once the charger is connected.
+
+**When not in use:** the screen dims after 2 min, turns off after 5 min,
+and the device sleeps after 15 min on battery (never when plugged in).
+Video playback and the ☕/☾ panel button keep it awake. Low (15 %) and
+critical (5 %) battery warnings appear as notifications. SSH
+connections drop when the device sleeps, but mosh sessions reconnect
+(use the mosh switch in *SSH Hosts*).
+
+### SSH hosts, screenshots, Bluetooth, Tailscale
+
+* **SSH** in the panel lists every `Host` in your `~/.ssh/config` as a big
+  button, has a quick-connect box, and an optional *use mosh* switch.
+  *Edit host list* opens the file (creating a commented example).
+* **Screenshots**: `Print` (whole screen), `Shift+Print` (area), or the
+  desktop menu / apps tray (also "in 3 seconds"). Saved to
+  `~/Pictures/Screenshots` and copied to the clipboard.
+* **Bluetooth**: Settings › Network. The switch turns the radio off to
+  save battery; *Devices…* opens the pairing manager.
+* **Tailscale**: Settings › Network. Turn it on, then *Sign in…* opens the
+  login page in Chromium. It's off by default and uses no resources until
+  enabled.
 
 ### On-screen keyboard
 

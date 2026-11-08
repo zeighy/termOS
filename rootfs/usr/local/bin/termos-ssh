@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""termOS SSH hosts: one-tap connections to the hosts in ~/.ssh/config."""
+import os
+import re
+import shlex
+import subprocess
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, Gtk  # noqa: E402
+
+HOME = os.path.expanduser("~")
+SSH_CONFIG = os.path.join(HOME, ".ssh", "config")
+SETTINGS_CONF = os.path.join(HOME, ".config", "termos", "settings.conf")
+TEMPLATE = """# SSH hosts - each "Host" entry appears as a button in termOS "SSH Hosts".
+# Example (remove the # signs):
+#
+# Host myserver
+#     HostName 192.168.1.10
+#     User me
+#     # IdentityFile ~/.ssh/id_ed25519
+#
+# Host work-box
+#     HostName box.example.com
+#     User admin
+#     Port 2222
+"""
+
+CSS = b"""
+.host { min-height: 64px; font-size: 17px; padding: 0 20px; }
+.hint { opacity: 0.6; }
+entry, button { min-height: 44px; }
+switch { min-width: 64px; min-height: 34px; }
+"""
+
+
+def read_hosts():
+    hosts = []
+    try:
+        with open(SSH_CONFIG) as f:
+            for line in f:
+                m = re.match(r"^\s*Host\s+(.+)$", line, re.I)
+                if not m:
+                    continue
+                for h in m.group(1).split():
+                    if not any(c in h for c in "*?!"):
+                        hosts.append(h)
+    except OSError:
+        pass
+    return hosts
+
+
+def get_setting(key, default):
+    try:
+        with open(SETTINGS_CONF) as f:
+            for line in f:
+                if line.startswith(key + "="):
+                    return line.split("=", 1)[1].strip().strip("'\"")
+    except OSError:
+        pass
+    return default
+
+
+def set_setting(key, value):
+    os.makedirs(os.path.dirname(SETTINGS_CONF), exist_ok=True)
+    lines = []
+    try:
+        with open(SETTINGS_CONF) as f:
+            lines = [ln for ln in f if not ln.startswith(key + "=")]
+    except OSError:
+        pass
+    lines.append(f"{key}={value}\n")
+    with open(SETTINGS_CONF, "w") as f:
+        f.writelines(lines)
+
+
+def connect(target, use_mosh):
+    cmd = ["mosh", target] if use_mosh else ["ssh", target]
+    # keep the window open if the connection fails, so the error can be read
+    shell = f"{shlex.join(cmd)}; echo; read -rp 'Connection closed. Press Enter to close.'"
+    subprocess.Popen(["foot", "-T", f"{cmd[0]} {target}", "-e", "bash", "-c", shell],
+                     start_new_session=True)
+
+
+class App(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="SSH Hosts")
+        self.set_default_size(560, 640)
+        self.set_icon_name("utilities-terminal")
+        prov = Gtk.CssProvider()
+        prov.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        outer.set_margin_top(20)
+        outer.set_margin_bottom(20)
+        outer.set_halign(Gtk.Align.CENTER)
+        outer.set_size_request(520, -1)
+        self.add(outer)
+
+        quick = Gtk.Box(spacing=8)
+        self.entry = Gtk.Entry(placeholder_text="user@host  (quick connect)")
+        self.entry.connect("activate", self.quick_connect)
+        go = Gtk.Button(label="Connect")
+        go.connect("clicked", self.quick_connect)
+        quick.pack_start(self.entry, True, True, 0)
+        quick.pack_start(go, False, False, 0)
+        outer.pack_start(quick, False, False, 0)
+
+        mrow = Gtk.Box(spacing=12)
+        lb = Gtk.Label(label="Use mosh (survives sleep and Wi-Fi changes; server needs mosh)",
+                       xalign=0)
+        lb.set_line_wrap(True)
+        self.mosh = Gtk.Switch(active=get_setting("SSH_MOSH", "0") == "1")
+        self.mosh.set_valign(Gtk.Align.CENTER)
+        self.mosh.connect("notify::active",
+                          lambda s, _p: set_setting("SSH_MOSH", "1" if s.get_active() else "0"))
+        mrow.pack_start(lb, True, True, 0)
+        mrow.pack_end(self.mosh, False, False, 0)
+        outer.pack_start(mrow, False, False, 0)
+
+        self.list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        sw = Gtk.ScrolledWindow()
+        sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sw.add(self.list)
+        outer.pack_start(sw, True, True, 0)
+
+        bottom = Gtk.Box(spacing=8)
+        edit = Gtk.Button(label="Edit host list")
+        edit.connect("clicked", self.edit)
+        reload_btn = Gtk.Button(label="Reload")
+        reload_btn.connect("clicked", lambda _b: self.fill())
+        bottom.pack_start(edit, True, True, 0)
+        bottom.pack_start(reload_btn, True, True, 0)
+        outer.pack_start(bottom, False, False, 0)
+
+        self.connect("focus-in-event", lambda *_a: self.fill())
+        self.fill()
+
+    def fill(self):
+        for c in self.list.get_children():
+            c.destroy()
+        hosts = read_hosts()
+        if not hosts:
+            lb = Gtk.Label(label="No hosts yet.\nTap \"Edit host list\" to add some to ~/.ssh/config.",
+                           justify=Gtk.Justification.CENTER)
+            lb.get_style_context().add_class("hint")
+            self.list.pack_start(lb, False, False, 30)
+        for h in hosts:
+            b = Gtk.Button(label=h)
+            b.get_style_context().add_class("host")
+            b.connect("clicked", lambda _b, host=h: connect(host, self.mosh.get_active()))
+            self.list.pack_start(b, False, False, 0)
+        self.list.show_all()
+        return False
+
+    def quick_connect(self, _w):
+        t = self.entry.get_text().strip()
+        if re.fullmatch(r"[A-Za-z0-9._@:\[\]-]+", t):
+            connect(t, self.mosh.get_active())
+
+    def edit(self, _b):
+        os.makedirs(os.path.dirname(SSH_CONFIG), mode=0o700, exist_ok=True)
+        if not os.path.exists(SSH_CONFIG):
+            with open(SSH_CONFIG, "w") as f:
+                f.write(TEMPLATE)
+            os.chmod(SSH_CONFIG, 0o600)
+        subprocess.Popen(["mousepad", SSH_CONFIG], start_new_session=True)
+
+
+def main():
+    win = App()
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()
