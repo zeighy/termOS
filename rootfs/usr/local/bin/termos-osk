@@ -1,0 +1,17 @@
+#!/bin/bash
+# termOS on-screen keyboard (squeekboard). Usage: termos-osk [toggle|show|hide]
+# Squeekboard is only started the first time it is asked for, so it costs
+# nothing when you use the keyboard cover.
+visible() {
+    busctl --user get-property sm.puri.OSK0 /sm/puri/OSK0 sm.puri.OSK0 Visible 2>/dev/null | awk '{print $2}'
+}
+if ! pgrep -u "$USER" -x squeekboard >/dev/null; then
+    setsid -f squeekboard >/dev/null 2>&1
+    for _ in $(seq 30); do [ -n "$(visible)" ] && break; sleep 0.1; done
+fi
+case "${1:-toggle}" in
+    show) v=true ;;
+    hide) v=false ;;
+    *) [ "$(visible)" = true ] && v=false || v=true ;;
+esac
+busctl --user call sm.puri.OSK0 /sm/puri/OSK0 sm.puri.OSK0 SetVisible b "$v"

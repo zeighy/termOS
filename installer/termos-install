@@ -1,0 +1,245 @@
+#!/bin/bash
+# termOS installer - run from the termOS live USB as root.
+#
+#   termos-install            install from the packages stored on the USB (no internet needed)
+#   termos-install --online   download the newest packages from Arch mirrors instead
+#
+# WIPES THE WHOLE TARGET DISK.
+set -euo pipefail
+
+TERMOS=/opt/termos
+REPO="$TERMOS/repo"
+ROOTFS="$TERMOS/rootfs"
+PKGLIST="$TERMOS/packages.x86_64"
+MNT=/mnt
+MIRROR='https://geo.mirror.pkgbuild.com/$repo/os/$arch'
+
+ONLINE=0
+[[ ${1:-} == --online ]] && ONLINE=1
+
+c_bold=$'\e[1m'; c_red=$'\e[31m'; c_grn=$'\e[32m'; c_off=$'\e[0m'
+say()  { printf '%s==>%s %s\n' "$c_grn$c_bold" "$c_off" "$*"; }
+die()  { printf '%sERROR:%s %s\n' "$c_red$c_bold" "$c_off" "$*" >&2; exit 1; }
+ask()  { local p=$1 d=${2:-} a; read -rp "$p${d:+ [$d]}: " a; printf '%s' "${a:-$d}"; }
+
+# ---------------------------------------------------------------- checks
+[[ $EUID -eq 0 ]] || die "run as root"
+[[ -d /sys/firmware/efi ]] || die "not booted in UEFI mode. Enable UEFI boot (disable CSM/Legacy) in the firmware setup."
+[[ -f $PKGLIST ]] || die "$PKGLIST missing - is this the termOS live USB?"
+if [[ $ONLINE -eq 0 && ! -f $REPO/termos.db ]]; then
+    die "offline package repo missing; use --online"
+fi
+if [[ $(cat /sys/firmware/efi/fw_platform_size 2>/dev/null) == 32 ]]; then
+    say "Note: 32-bit UEFI firmware detected; systemd-boot will be installed in 32-bit mode."
+fi
+
+clear
+cat <<EOF
+${c_bold}termOS installer${c_off}
+Minimal Arch Linux: labwc desktop, foot terminal, Thunar, Chromium, Remmina.
+Package source: $([[ $ONLINE -eq 1 ]] && echo "Arch mirrors (online)" || echo "this USB (offline)")
+
+EOF
+
+# ---------------------------------------------------------------- disk
+live_dev=""
+if src=$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null); then
+    live_dev=$(lsblk -no PKNAME "$src" 2>/dev/null | head -n1)
+fi
+mapfile -t disks < <(lsblk -dpno NAME,TYPE,RO | awk '$2=="disk" && $3==0 {print $1}' \
+    | grep -Ev '/dev/(loop|zram|sr|fd)|boot[0-9]$|rpmb$' \
+    | grep -v "^/dev/${live_dev:-NONE}\$" || true)
+(( ${#disks[@]} )) || die "no installable disk found"
+
+echo "Disks:"
+for i in "${!disks[@]}"; do
+    printf '  %d) %s\n' $((i + 1)) "$(lsblk -dno NAME,SIZE,MODEL "${disks[$i]}" | xargs)"
+done
+choice=$(ask "Install to disk number" 1)
+[[ $choice =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#disks[@]} )) || die "invalid choice"
+DISK=${disks[$((choice - 1))]}
+
+# ---------------------------------------------------------------- hostname
+dmi() { cat "/sys/class/dmi/id/$1" 2>/dev/null || true; }
+make_hostname() {
+    local s
+    s=$(dmi product_serial | tr -cd 'A-Za-z0-9')
+    # reject placeholder serials that some firmware ships with
+    if [[ ${#s} -lt 4 || $s =~ ^(0+|1234567890?|0123456789|Default.*|ToBeFilled.*|SystemSerial.*|None|NotSpecified|NotApplicable|123456789)$ \
+          || $s =~ ^(.)\1+$ ]]; then
+        s=$(dmi board_serial | tr -cd 'A-Za-z0-9')
+        [[ ${#s} -lt 4 || $s =~ ^(0+|Default.*|ToBeFilled.*|None|NotSpecified)$ ]] && s=""
+    fi
+    [[ -n $s ]] || s=$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')
+    printf 'termOS-%s' "${s:0:20}"
+}
+HOSTNAME_DEFAULT=$(make_hostname)
+
+# ---------------------------------------------------------------- questions
+echo
+HOST=$(ask "Hostname" "$HOSTNAME_DEFAULT")
+[[ $HOST =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || die "invalid hostname: $HOST"
+
+USERNAME=$(ask "Username" "term")
+[[ $USERNAME =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "invalid username (lowercase letters, digits, - and _)"
+
+while :; do
+    read -rsp "Password for $USERNAME: " PW1; echo
+    read -rsp "Repeat password: " PW2; echo
+    [[ -n $PW1 && $PW1 == "$PW2" ]] && break
+    echo "Passwords empty or do not match, try again."
+done
+
+while :; do
+    TZONE=$(ask "Timezone (e.g. America/New_York, Europe/Berlin)" "UTC")
+    [[ -f /usr/share/zoneinfo/$TZONE ]] && break
+    echo "Unknown timezone. Examples: $(cd /usr/share/zoneinfo && ls -d America/* Europe/* | shuf -n 3 | xargs)"
+done
+
+KEYMAP=$(ask "Keyboard layout (us, uk, de, fr, ...)" "us")
+XKB=$KEYMAP; [[ $KEYMAP == uk ]] && XKB=gb
+
+echo
+echo "${c_bold}Summary${c_off}"
+echo "  Disk:      $DISK  ($(lsblk -dno SIZE,MODEL "$DISK" | xargs))  ${c_red}${c_bold}<- EVERYTHING ON IT WILL BE ERASED${c_off}"
+echo "  Hostname:  $HOST"
+echo "  User:      $USERNAME (sudo, auto-login)"
+echo "  Timezone:  $TZONE    Keyboard: $KEYMAP"
+echo
+[[ $(ask "Type 'yes' to wipe $DISK and install") == yes ]] || die "aborted"
+
+# ---------------------------------------------------------------- partition
+say "Partitioning $DISK"
+umount -R "$MNT" 2>/dev/null || true
+swapoff -a 2>/dev/null || true
+wipefs -af "$DISK" >/dev/null
+sgdisk --zap-all "$DISK" >/dev/null
+sgdisk -n1:0:+512M -t1:ef00 -c1:EFI \
+       -n2:0:0     -t2:8304 -c2:termOS "$DISK" >/dev/null
+partprobe "$DISK" 2>/dev/null || true
+udevadm settle
+p=""; [[ $DISK =~ [0-9]$ ]] && p="p"     # mmcblk0p1 / nvme0n1p1 vs sda1
+ESP="${DISK}${p}1"; ROOT="${DISK}${p}2"
+for _ in $(seq 20); do [[ -b $ROOT ]] && break; sleep 0.25; done
+
+say "Formatting"
+mkfs.fat -F32 -n EFI "$ESP" >/dev/null
+mkfs.ext4 -qF -L termOS "$ROOT"
+mount -o noatime "$ROOT" "$MNT"
+mount --mkdir -o fmask=0077,dmask=0077 "$ESP" "$MNT/boot"
+
+# ---------------------------------------------------------------- packages
+mapfile -t PKGS < <(grep -Ev '^\s*(#|$)' "$PKGLIST")
+conf=$(mktemp)
+if [[ $ONLINE -eq 1 ]]; then
+    say "Installing packages from Arch mirrors"
+    echo "Server = $MIRROR" > /etc/pacman.d/mirrorlist.termos
+    sed 's|^Include = /etc/pacman.d/mirrorlist$|Include = /etc/pacman.d/mirrorlist.termos|' /etc/pacman.conf > "$conf"
+    # prefer the live system's ranked mirror list if reflector produced one
+    grep -q '^Server' /etc/pacman.d/mirrorlist 2>/dev/null && cp /etc/pacman.conf "$conf"
+else
+    say "Installing packages from the USB (offline)"
+    siglevel="Required DatabaseOptional"
+    compgen -G "$REPO/*.sig" >/dev/null || siglevel="Optional TrustAll"
+    cat > "$conf" <<EOF
+[options]
+Architecture = auto
+ParallelDownloads = 5
+SigLevel = Required DatabaseOptional
+LocalFileSigLevel = Optional
+
+[termos]
+SigLevel = $siglevel
+Server = file://$REPO
+EOF
+fi
+pacstrap -C "$conf" -K "$MNT" "${PKGS[@]}"
+rm -f "$conf"
+
+# ---------------------------------------------------------------- configure
+say "Configuring system"
+genfstab -U "$MNT" > "$MNT/etc/fstab"
+sed -i 's/relatime/noatime/' "$MNT/etc/fstab"
+
+# termOS files (configs, skel, helper scripts)
+cp -a "$ROOTFS/." "$MNT/"
+chmod 0440 "$MNT/etc/sudoers.d/10-wheel"
+chmod 0755 "$MNT"/usr/local/bin/termos-*
+
+# pacman mirror for updates (installed system uses the normal Arch repos)
+if grep -q '^Server' /etc/pacman.d/mirrorlist 2>/dev/null; then
+    cp /etc/pacman.d/mirrorlist "$MNT/etc/pacman.d/mirrorlist"
+else
+    printf '# termOS default: Arch geo-mirror. Run reflector or edit to taste.\nServer = %s\n' "$MIRROR" \
+        > "$MNT/etc/pacman.d/mirrorlist"
+fi
+sed -i 's/^#ParallelDownloads.*/ParallelDownloads = 5/; s/^#Color$/Color/' "$MNT/etc/pacman.conf"
+
+echo "$HOST" > "$MNT/etc/hostname"
+cat > "$MNT/etc/hosts" <<EOF
+127.0.0.1   localhost
+::1         localhost
+127.0.1.1   $HOST
+EOF
+
+sed -i 's/^#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' "$MNT/etc/locale.gen"
+echo "LANG=en_US.UTF-8" > "$MNT/etc/locale.conf"
+echo "KEYMAP=$KEYMAP" > "$MNT/etc/vconsole.conf"
+cat > "$MNT/etc/termos/session.env" <<EOF
+export XKB_DEFAULT_LAYOUT=$XKB
+EOF
+ln -sf "/usr/share/zoneinfo/$TZONE" "$MNT/etc/localtime"
+
+# fast boot: systemd-based initramfs, no fallback image
+cat > "$MNT/etc/mkinitcpio.conf.d/termos.conf" <<'EOF'
+HOOKS=(systemd autodetect microcode modconf kms keyboard sd-vconsole block filesystems fsck)
+COMPRESSION="zstd"
+EOF
+sed -i "s/^PRESETS=.*/PRESETS=('default')/" "$MNT/etc/mkinitcpio.d/linux.preset"
+rm -f "$MNT/boot/initramfs-linux-fallback.img"
+
+# auto-login on tty1 -> ~/.bash_profile starts the desktop
+mkdir -p "$MNT/etc/systemd/system/getty@tty1.service.d"
+cat > "$MNT/etc/systemd/system/getty@tty1.service.d/autologin.conf" <<EOF
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty -o '-p -f -- \\\\u' --noclear --autologin $USERNAME %I \$TERM
+EOF
+
+root_uuid=$(blkid -s UUID -o value "$ROOT")
+
+arch-chroot "$MNT" /bin/bash -e <<EOF
+locale-gen >/dev/null
+useradd -m -G wheel,video,input,audio -s /bin/bash "$USERNAME"
+passwd -l root >/dev/null
+mkinitcpio -P
+bootctl install --esp-path=/boot
+systemctl enable NetworkManager.service systemd-timesyncd.service fstrim.timer systemd-boot-update.service
+systemctl mask NetworkManager-wait-online.service
+EOF
+printf '%s:%s\n' "$USERNAME" "$PW1" | arch-chroot "$MNT" chpasswd
+unset PW1 PW2
+
+cat > "$MNT/boot/loader/loader.conf" <<'EOF'
+default termos.conf
+timeout 0
+console-mode keep
+editor no
+EOF
+cat > "$MNT/boot/loader/entries/termos.conf" <<EOF
+title   termOS
+linux   /vmlinuz-linux
+initrd  /initramfs-linux.img
+options root=UUID=$root_uuid rw quiet loglevel=3 rd.udev.log_level=3 systemd.show_status=auto nowatchdog
+EOF
+
+# keep the installed system small: drop the copied package cache
+rm -rf "$MNT"/var/cache/pacman/pkg/*
+
+sync
+umount -R "$MNT"
+echo
+say "${c_bold}termOS is installed on $DISK as '$HOST'.${c_off}"
+echo "Remove the USB stick, then reboot (hold Space while booting to see the boot menu)."
+[[ $(ask "Reboot now? (y/n)" y) == y ]] && systemctl reboot
+exit 0

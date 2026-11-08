@@ -1,0 +1,2 @@
+termOS - minimal Arch Linux remote-access terminal
+Update everything with:  sudo pacman -Syu

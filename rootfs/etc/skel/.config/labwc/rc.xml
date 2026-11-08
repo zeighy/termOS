@@ -1,0 +1,62 @@
+<?xml version="1.0"?>
+<labwc_config>
+
+  <core>
+    <gap>0</gap>
+  </core>
+
+  <theme>
+    <cornerRadius>6</cornerRadius>
+    <font place="ActiveWindow"><name>sans</name><size>11</size><weight>bold</weight></font>
+    <font place="InactiveWindow"><name>sans</name><size>11</size></font>
+    <font place="MenuItem"><name>sans</name><size>14</size></font>
+    <font place="OnScreenDisplay"><name>sans</name><size>12</size></font>
+  </theme>
+
+  <!-- Touch screen: map to the built-in panel so taps stay correct when the
+       screen is rotated. termos-display-setup replaces TERMOS_PANEL with the
+       real output name (eDP-1, DSI-1, ...) on first login. -->
+  <touch mapToOutput="TERMOS_PANEL" mouseEmulation="no" />
+
+  <libinput>
+    <device category="touchpad">
+      <tap>yes</tap>
+      <naturalScroll>no</naturalScroll>
+    </device>
+  </libinput>
+
+  <windowRules>
+    <!-- Main apps open maximized: friendlier on a 10" touch screen. -->
+    <windowRule identifier="foot"><action name="Maximize" /></windowRule>
+    <windowRule identifier="chromium"><action name="Maximize" /></windowRule>
+    <windowRule identifier="org.remmina.Remmina"><action name="Maximize" /></windowRule>
+  </windowRules>
+
+  <keyboard>
+    <default />
+    <keybind key="W-Return"><action name="Execute" command="foot" /></keybind>
+    <keybind key="C-A-t"><action name="Execute" command="foot" /></keybind>
+    <keybind key="W-b"><action name="Execute" command="chromium" /></keybind>
+    <keybind key="W-e"><action name="Execute" command="thunar" /></keybind>
+    <keybind key="W-r"><action name="Execute" command="remmina" /></keybind>
+    <keybind key="W-k"><action name="Execute" command="termos-osk toggle" /></keybind>
+    <keybind key="W-q"><action name="Close" /></keybind>
+    <keybind key="W-Up"><action name="ToggleMaximize" /></keybind>
+    <keybind key="W-space"><action name="ShowMenu" menu="root-menu" /></keybind>
+    <keybind key="XF86MonBrightnessUp"><action name="Execute" command="brightnessctl set +10%" /></keybind>
+    <keybind key="XF86MonBrightnessDown"><action name="Execute" command="brightnessctl set 10%-" /></keybind>
+    <keybind key="XF86AudioRaiseVolume"><action name="Execute" command="pactl set-sink-volume @DEFAULT_SINK@ +5%" /></keybind>
+    <keybind key="XF86AudioLowerVolume"><action name="Execute" command="pactl set-sink-volume @DEFAULT_SINK@ -5%" /></keybind>
+    <keybind key="XF86AudioMute"><action name="Execute" command="pactl set-sink-mute @DEFAULT_SINK@ toggle" /></keybind>
+  </keyboard>
+
+  <mouse>
+    <default />
+    <!-- Tapping (or left-clicking) the empty desktop opens the app/power menu. -->
+    <context name="Root">
+      <mousebind button="Left" action="Press"><action name="ShowMenu" menu="root-menu" /></mousebind>
+      <mousebind button="Right" action="Press"><action name="ShowMenu" menu="root-menu" /></mousebind>
+    </context>
+  </mouse>
+
+</labwc_config>

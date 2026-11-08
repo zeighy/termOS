@@ -1,0 +1,65 @@
+# termOS target system packages (official Arch repos only).
+# Everything here is updated with a normal `pacman -Syu`.
+
+# --- base system ---
+base
+linux
+linux-firmware
+intel-ucode
+amd-ucode
+sof-firmware
+alsa-ucm-conf
+e2fsprogs
+dosfstools
+sudo
+nano
+bash-completion
+usbutils
+pciutils
+zram-generator
+polkit
+
+# --- graphics / video (Intel + AMD) ---
+mesa
+vulkan-intel
+vulkan-radeon
+intel-media-driver
+
+# --- networking ---
+networkmanager
+wpa_supplicant
+network-manager-applet
+
+# --- remote access ---
+openssh
+mosh
+tmux
+remmina
+freerdp
+libvncserver
+
+# --- desktop ---
+labwc
+waybar
+swaybg
+foot
+thunar
+gvfs
+chromium
+squeekboard
+xdg-utils
+wl-clipboard
+wlr-randr
+iio-sensor-proxy
+brightnessctl
+
+# --- audio ---
+pipewire
+pipewire-pulse
+pipewire-alsa
+wireplumber
+
+# --- fonts ---
+ttf-dejavu
+ttf-liberation
+noto-fonts-emoji

@@ -1,0 +1,55 @@
+#!/bin/bash
+# termOS screen rotation helper.
+#   termos-rotate cw       rotate 90 degrees clockwise (turns auto-rotate off)
+#   termos-rotate auto     follow the accelerometer
+#   termos-rotate lock     stop following the accelerometer
+#   termos-rotate apply    re-apply the saved rotation
+conf="$HOME/.config/termos/display.conf"
+pidfile="${XDG_RUNTIME_DIR:-/tmp}/termos-autorotate.pid"
+[ -f "$conf" ] || { echo "no $conf yet (run termos-display-setup)"; exit 1; }
+. "$conf"
+[ -n "$PANEL" ] || exit 0
+
+save() {
+    sed -i -e "s/^ROT=.*/ROT=$ROT/" -e "s/^AUTO=.*/AUTO=$AUTO/" "$conf"
+}
+apply() {
+    local deg=$(( (BASE + ROT) % 360 )) t
+    case $deg in 0) t=normal ;; *) t=$deg ;; esac
+    wlr-randr --output "$PANEL" --transform "$t"
+}
+daemon_running() {
+    [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null
+}
+stop_daemon() {
+    daemon_running && kill -TERM -- "-$(cat "$pidfile")" 2>/dev/null
+    rm -f "$pidfile"
+}
+
+case "${1:-apply}" in
+    apply) apply ;;
+    cw)
+        stop_daemon
+        ROT=$(( (ROT + 90) % 360 )); AUTO=0; save; apply ;;
+    lock)
+        stop_daemon; AUTO=0; save ;;
+    auto)
+        AUTO=1; save; exec "$0" start-daemon ;;
+    start-daemon)
+        daemon_running || setsid -f "$0" daemon >/dev/null 2>&1 ;;
+    daemon)
+        echo $$ > "$pidfile"
+        command -v monitor-sensor >/dev/null || exit 0
+        monitor-sensor | while read -r line; do
+            case $line in
+                *"No accelerometer"*) exit 0 ;;
+                *normal*)    ROT=0 ;;
+                *left-up*)   ROT=90 ;;
+                *bottom-up*) ROT=180 ;;
+                *right-up*)  ROT=270 ;;
+                *) continue ;;
+            esac
+            save; apply
+        done ;;
+    *) sed -n '2,7p' "$0"; exit 1 ;;
+esac

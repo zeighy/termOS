@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_menu>
+  <menu id="root-menu" label="termOS">
+    <item label="Terminal"><action name="Execute" command="foot" /></item>
+    <item label="Browser"><action name="Execute" command="chromium" /></item>
+    <item label="Files"><action name="Execute" command="thunar" /></item>
+    <item label="Remote Desktop (RDP/VNC)"><action name="Execute" command="remmina" /></item>
+    <separator />
+    <item label="On-screen keyboard"><action name="Execute" command="termos-osk toggle" /></item>
+    <menu id="display-menu" label="Display">
+      <item label="Rotate 90°"><action name="Execute" command="termos-rotate cw" /></item>
+      <item label="Auto-rotate on"><action name="Execute" command="termos-rotate auto" /></item>
+      <item label="Auto-rotate off"><action name="Execute" command="termos-rotate lock" /></item>
+    </menu>
+    <item label="Wi-Fi settings (text)"><action name="Execute" command="foot -e nmtui" /></item>
+    <item label="Update system"><action name="Execute" command="foot -e sh -c 'sudo pacman -Syu; echo; read -rp \"Press Enter to close\"'" /></item>
+    <separator />
+    <menu id="power-menu" label="Power">
+      <item label="Suspend"><action name="Execute" command="systemctl suspend" /></item>
+      <item label="Restart"><action name="Execute" command="systemctl reboot" /></item>
+      <item label="Shut down"><action name="Execute" command="systemctl poweroff" /></item>
+      <item label="Restart desktop"><action name="Exit" /></item>
+    </menu>
+  </menu>
+</openbox_menu>

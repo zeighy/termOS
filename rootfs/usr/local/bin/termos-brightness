@@ -1,0 +1,8 @@
+#!/bin/bash
+# termOS: tap-friendly brightness. "cycle" steps 100 -> 70 -> 40 -> 15 -> 100 %
+cur=$(brightnessctl -m | cut -d, -f4 | tr -d %)
+next=100
+for l in 70 40 15; do
+    if [ "$cur" -gt "$l" ]; then next=$l; break; fi
+done
+brightnessctl -q set "${next}%"

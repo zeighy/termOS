@@ -1,0 +1,29 @@
+* {
+    font-family: "DejaVu Sans", "Noto Color Emoji", sans-serif;
+    font-size: 15px;
+    border: none;
+    border-radius: 0;
+    min-height: 0;
+}
+window#waybar { background: #181825; color: #cdd6f4; }
+
+#custom-term, #custom-web, #custom-files, #custom-remote,
+#custom-osk, #custom-rotate, #custom-power,
+#custom-suspend, #custom-reboot, #custom-shutdown,
+#backlight, #pulseaudio, #battery, #clock, #tray {
+    padding: 0 14px;
+    margin: 4px 1px;
+    border-radius: 6px;
+}
+#custom-term, #custom-web, #custom-files, #custom-remote { background: #313244; }
+#custom-term:hover, #custom-web:hover, #custom-files:hover, #custom-remote:hover,
+#custom-osk:hover, #custom-rotate:hover, #custom-power:hover { background: #45475a; }
+#custom-osk, #custom-rotate, #custom-power { font-size: 20px; }
+#custom-suspend, #custom-reboot { background: #313244; }
+#custom-shutdown { background: #a6303f; }
+
+#taskbar button { padding: 0 10px; margin: 4px 1px; color: #a6adc8; border-radius: 6px; }
+#taskbar button.active { background: #45475a; color: #ffffff; }
+
+#battery.warning { color: #f9e2af; }
+#battery.critical { color: #f38ba8; }

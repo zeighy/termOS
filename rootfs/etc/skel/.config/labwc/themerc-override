@@ -1,0 +1,5 @@
+# Bigger touch targets
+window.titlebar.padding.height: 6
+menu.items.padding.x: 16
+menu.items.padding.y: 10
+menu.overlap.x: 0

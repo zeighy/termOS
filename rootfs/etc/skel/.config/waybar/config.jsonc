@@ -1,0 +1,62 @@
+// termOS panel - big buttons, everything works with a single tap.
+{
+    "layer": "top",
+    "position": "top",
+    "height": 42,
+    "spacing": 2,
+    "modules-left": [
+        "custom/term", "custom/web", "custom/files", "custom/remote",
+        "wlr/taskbar"
+    ],
+    "modules-right": [
+        "tray", "custom/osk", "custom/rotate", "backlight",
+        "pulseaudio", "battery", "clock", "group/power"
+    ],
+
+    "custom/term":   { "format": "Terminal", "on-click": "foot",     "tooltip": false },
+    "custom/web":    { "format": "Browser",  "on-click": "chromium", "tooltip": false },
+    "custom/files":  { "format": "Files",    "on-click": "thunar",   "tooltip": false },
+    "custom/remote": { "format": "Remote",   "on-click": "remmina",  "tooltip": false },
+
+    "wlr/taskbar": {
+        "format": "{title:.18}",
+        "on-click": "activate",
+        "on-click-middle": "close",
+        "tooltip-format": "{title}"
+    },
+
+    "tray": { "icon-size": 22, "spacing": 8 },
+
+    "custom/osk":    { "format": "⌨", "on-click": "termos-osk toggle", "tooltip-format": "On-screen keyboard" },
+    "custom/rotate": { "format": "⟳", "on-click": "termos-rotate cw",  "tooltip-format": "Rotate screen (turns auto-rotate off)" },
+
+    "backlight": {
+        "format": "☀ {percent}%",
+        "on-click": "termos-brightness cycle",
+        "on-scroll-up": "brightnessctl set +5%",
+        "on-scroll-down": "brightnessctl set 5%-"
+    },
+    "pulseaudio": {
+        "format": "🔊 {volume}%",
+        "format-muted": "🔇",
+        "on-click": "pactl set-sink-mute @DEFAULT_SINK@ toggle",
+        "on-scroll-up": "pactl set-sink-volume @DEFAULT_SINK@ +5%",
+        "on-scroll-down": "pactl set-sink-volume @DEFAULT_SINK@ -5%"
+    },
+    "battery": {
+        "format": "🔋 {capacity}%",
+        "format-charging": "⚡ {capacity}%",
+        "states": { "warning": 25, "critical": 10 }
+    },
+    "clock": { "format": "{:%H:%M}", "tooltip-format": "{:%A %d %B %Y}" },
+
+    "group/power": {
+        "orientation": "horizontal",
+        "drawer": { "click-to-reveal": true, "transition-left-to-right": false },
+        "modules": ["custom/power", "custom/suspend", "custom/reboot", "custom/shutdown"]
+    },
+    "custom/power":    { "format": "⏻",        "tooltip": false },
+    "custom/suspend":  { "format": "Sleep",    "on-click": "systemctl suspend",  "tooltip": false },
+    "custom/reboot":   { "format": "Restart",  "on-click": "systemctl reboot",   "tooltip": false },
+    "custom/shutdown": { "format": "Shut down","on-click": "systemctl poweroff", "tooltip": false }
+}
