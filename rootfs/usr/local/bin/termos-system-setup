@@ -6,4 +6,14 @@ now=""; [ "${1:-}" = --now ] && now=--now
 systemctl enable $now NetworkManager.service bluetooth.service termos-power.service \
     systemd-timesyncd.service fstrim.timer systemd-boot-update.service
 systemctl mask NetworkManager-wait-online.service
+
+# boot splash (Plymouth) on installs that predate it: add the initramfs hook and
+# the kernel "splash" option, then rebuild the initramfs. Idempotent.
+if [ -n "$now" ] && [ -f /etc/mkinitcpio.conf.d/termos.conf ] \
+   && ! grep -q '\bplymouth\b' /etc/mkinitcpio.conf.d/termos.conf; then
+    sed -i 's/\bkms\b/kms plymouth/' /etc/mkinitcpio.conf.d/termos.conf
+    entry=/boot/loader/entries/termos.conf
+    [ -f "$entry" ] && ! grep -q '\bsplash\b' "$entry" && sed -i '/^options/s/\bquiet\b/quiet splash/' "$entry"
+    mkinitcpio -P || true
+fi
 exit 0

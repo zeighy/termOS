@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=termOS
+Description=termOS boot splash: logo and spinner
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/termos
+ScriptFile=/usr/share/plymouth/themes/termos/termos.script

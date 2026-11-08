@@ -640,12 +640,24 @@ class Settings(Gtk.Window):
         h.pack_start(apply_btn, False, False, 0)
         row(b, "Layout", h, "Two-letter layout code, e.g. us, gb, de, fr")
 
+        section(b, "Touchpad")
+        sc = Gtk.ComboBoxText()
+        sc.append("0", "Normal (content follows the scrollbar)")
+        sc.append("1", "Inverted (content follows your fingers)")
+        sc.set_active_id("1" if st.get("NATURAL_SCROLL") == "1" else "0")
+
+        def set_scroll(c):
+            write_conf(SETTINGS_CONF, "NATURAL_SCROLL", c.get_active_id())
+            spawn("termos-apply-settings", "touchpad")
+        sc.connect("changed", set_scroll)
+        row(b, "Two-finger scroll direction", sc, "Applies to the touchpad on a keyboard cover or mouse pad")
+
         section(b, "On-screen keyboard")
         show = Gtk.Button(label="Show / hide")
         show.connect("clicked", lambda _b: spawn("termos-osk", "toggle"))
         row(b, "On-screen keyboard", show,
             "Also on the ⌨ panel button. Open apps shrink to stay visible above it.")
-        self.stack.add_titled(sw, "keyboard", "Keyboard")
+        self.stack.add_titled(sw, "keyboard", "Keyboard & Touchpad")
 
     # ---- Network ---------------------------------------------------------
     def network_page(self):

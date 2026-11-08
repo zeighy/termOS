@@ -1,0 +1,282 @@
+#!/usr/bin/env python3
+"""termOS Task Manager - see what is running and end it (GTK3, reads /proc)."""
+import os
+import pwd
+import signal
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import GLib, Gtk  # noqa: E402
+
+TICK = os.sysconf("SC_CLK_TCK")
+NCPU = os.cpu_count() or 1
+ME = os.getuid()
+CSS = b"""
+window, .background { font-size: 15px; }
+button, entry { min-height: 44px; }
+button { padding: 0 18px; }
+switch { min-width: 64px; min-height: 34px; }
+treeview { font-size: 15px; }
+treeview.view { padding: 0; }
+treeview header button { min-height: 40px; font-weight: bold; }
+.summary { font-size: 13px; opacity: 0.75; }
+"""
+
+
+def human(kb):
+    if kb >= 1024 * 1024:
+        return f"{kb / 1024 / 1024:.1f} GB"
+    if kb >= 1024:
+        return f"{kb / 1024:.0f} MB"
+    return f"{kb} kB"
+
+
+def meminfo():
+    d = {}
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                k, v = line.split(":", 1)
+                d[k] = int(v.split()[0])
+    except (OSError, ValueError):
+        pass
+    return d
+
+
+def total_jiffies():
+    try:
+        with open("/proc/stat") as f:
+            return sum(int(x) for x in f.readline().split()[1:9])
+    except (OSError, ValueError):
+        return 0
+
+
+def read_procs():
+    """pid -> (name, user, rss_kb, cpu_jiffies, uid, cmdline)"""
+    out = {}
+    pagekb = os.sysconf("SC_PAGE_SIZE") // 1024
+    for ent in os.listdir("/proc"):
+        if not ent.isdigit():
+            continue
+        try:
+            with open(f"/proc/{ent}/stat") as f:
+                raw = f.read()
+            # comm is in parentheses and may contain spaces/parens
+            lp, rp = raw.index("("), raw.rindex(")")
+            comm = raw[lp + 1:rp]
+            rest = raw[rp + 2:].split()
+            utime, stime = int(rest[11]), int(rest[12])
+            rss = int(rest[21]) * pagekb
+            uid = os.stat(f"/proc/{ent}").st_uid
+            with open(f"/proc/{ent}/cmdline", "rb") as f:
+                cmd = f.read().replace(b"\0", b" ").decode(errors="replace").strip()
+        except (OSError, ValueError, IndexError):
+            continue
+        if not cmd and not rss:
+            continue  # kernel thread
+        out[int(ent)] = (comm, uid, rss, utime + stime, cmd)
+    return out
+
+
+_users = {}
+
+
+def username(uid):
+    if uid not in _users:
+        try:
+            _users[uid] = pwd.getpwuid(uid).pw_name
+        except KeyError:
+            _users[uid] = str(uid)
+    return _users[uid]
+
+
+class TaskManager(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="Task Manager")
+        self.set_default_size(900, 640)
+        self.prev = {}
+        self.prev_total = total_jiffies()
+        self.paused = False
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        outer.set_border_width(12)
+        self.add(outer)
+
+        self.summary = Gtk.Label(xalign=0)
+        self.summary.get_style_context().add_class("summary")
+        outer.pack_start(self.summary, False, False, 0)
+
+        bar = Gtk.Box(spacing=8)
+        self.search = Gtk.SearchEntry(placeholder_text="Search")
+        self.search.connect("search-changed", lambda _e: self.filter.refilter())
+        bar.pack_start(self.search, True, True, 0)
+        bar.pack_start(Gtk.Label(label="Only my apps"), False, False, 0)
+        self.mine = Gtk.Switch(active=True, valign=Gtk.Align.CENTER)
+        self.mine.connect("notify::active", lambda *_: self.filter.refilter())
+        bar.pack_start(self.mine, False, False, 0)
+        outer.pack_start(bar, False, False, 0)
+
+        # pid, name, user, cpu, rss_kb, uid, cmdline
+        self.store = Gtk.ListStore(int, str, str, float, int, int, str)
+        self.filter = self.store.filter_new()
+        self.filter.set_visible_func(self.visible)
+        self.sorted = Gtk.TreeModelSort(model=self.filter)
+        self.sorted.set_sort_column_id(3, Gtk.SortType.DESCENDING)
+        self.tree = Gtk.TreeView(model=self.sorted)
+        self.tree.set_tooltip_column(6)
+        self.tree.set_activate_on_single_click(False)
+        cols = [("Name", 1, 360, None), ("CPU", 3, 90, self.fmt_cpu),
+                ("Memory", 4, 110, self.fmt_mem), ("User", 2, 110, None), ("PID", 0, 80, None)]
+        for title, idx, width, fmt in cols:
+            r = Gtk.CellRendererText(ellipsize=3)
+            r.set_padding(8, 10)
+            if idx in (0, 3, 4):  # numeric columns right-aligned
+                r.set_property("xalign", 1.0)
+            col = Gtk.TreeViewColumn(title, r, text=idx)
+            if fmt:
+                col.set_cell_data_func(r, fmt, idx)
+            col.set_sort_column_id(idx)
+            col.set_resizable(True)
+            col.set_min_width(width)
+            if idx == 1:
+                col.set_expand(True)
+            self.tree.append_column(col)
+        sw = Gtk.ScrolledWindow()
+        sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sw.add(self.tree)
+        outer.pack_start(sw, True, True, 0)
+
+        btns = Gtk.Box(spacing=8)
+        end = Gtk.Button(label="End task")
+        end.connect("clicked", lambda _b: self.kill(signal.SIGTERM))
+        force = Gtk.Button(label="Force quit")
+        force.get_style_context().add_class("destructive-action")
+        force.connect("clicked", lambda _b: self.kill(signal.SIGKILL))
+        self.pause_btn = Gtk.Button(label="Pause updates")
+        self.pause_btn.connect("clicked", self.toggle_pause)
+        btns.pack_start(end, False, False, 0)
+        btns.pack_start(force, False, False, 0)
+        btns.pack_end(self.pause_btn, False, False, 0)
+        outer.pack_start(btns, False, False, 0)
+
+        self.refresh()
+        GLib.timeout_add_seconds(2, self.tick)
+
+    @staticmethod
+    def fmt_cpu(_col, cell, model, it, idx):
+        cell.set_property("text", f"{model[it][idx]:.0f}%" if model[it][idx] >= 0.5 else "0%")
+
+    @staticmethod
+    def fmt_mem(_col, cell, model, it, idx):
+        cell.set_property("text", human(model[it][idx]))
+
+    def visible(self, model, it, _data):
+        row = model[it]
+        if self.mine.get_active() and row[5] != ME:
+            return False
+        q = self.search.get_text().strip().lower()
+        return not q or q in row[1].lower() or q in row[6].lower() or q == str(row[0])
+
+    def toggle_pause(self, _b):
+        self.paused = not self.paused
+        self.pause_btn.set_label("Resume updates" if self.paused else "Pause updates")
+
+    def tick(self):
+        if not self.paused:
+            self.refresh()
+        return True
+
+    def refresh(self):
+        procs = read_procs()
+        tot = total_jiffies()
+        dtot = max(tot - self.prev_total, 1)
+        # keep the selection across refreshes
+        sel_pid = None
+        model, it = self.tree.get_selection().get_selected()
+        if it:
+            sel_pid = model[it][0]
+        have = {}
+        for row in self.store:
+            have[row[0]] = row.iter
+        for pid, (comm, uid, rss, jiff, cmd) in procs.items():
+            # percent of ONE core, like top: 100% = one core fully busy
+            cpu = 0.0
+            if pid in self.prev:
+                cpu = max(jiff - self.prev[pid], 0) / dtot * NCPU * 100
+            vals = (pid, comm, username(uid), cpu, rss, uid, cmd or comm)
+            if pid in have:
+                self.store.set(have.pop(pid), *[x for kv in enumerate(vals) for x in kv])
+            else:
+                self.store.append(vals)
+        for it in have.values():
+            self.store.remove(it)
+        self.prev = {pid: v[3] for pid, v in procs.items()}
+        self.prev_total = tot
+
+        if sel_pid is not None:
+            for row in self.sorted:
+                if row[0] == sel_pid:
+                    self.tree.get_selection().select_iter(row.iter)
+                    break
+        m = meminfo()
+        used = m.get("MemTotal", 0) - m.get("MemAvailable", 0)
+        try:
+            load = " ".join(open("/proc/loadavg").read().split()[:3])
+        except OSError:
+            load = "?"
+        up = ""
+        try:
+            s = int(float(open("/proc/uptime").read().split()[0]))
+            up = f"   ·   up {s // 3600}h {s % 3600 // 60}m"
+        except OSError:
+            pass
+        self.summary.set_text(
+            f"{len(procs)} processes   ·   memory {human(used)} of {human(m.get('MemTotal', 0))}"
+            f"   ·   load {load}{up}")
+
+    def kill(self, sig):
+        model, it = self.tree.get_selection().get_selected()
+        if not it:
+            return
+        pid, name, uid = model[it][0], model[it][1], model[it][5]
+        if pid in (1, os.getpid()):
+            return
+        msg = ("Force quit" if sig == signal.SIGKILL else "End") + f" “{name}” (PID {pid})?"
+        if sig == signal.SIGKILL:
+            msg += "\nUnsaved work in it will be lost."
+        d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
+                              buttons=Gtk.ButtonsType.OK_CANCEL, text=msg)
+        ok = d.run() == Gtk.ResponseType.OK
+        d.destroy()
+        if not ok:
+            return
+        try:
+            os.kill(pid, sig)
+        except PermissionError:
+            self.error(f"Not allowed to stop {name} (owned by {username(uid)}).")
+        except ProcessLookupError:
+            pass
+        GLib.timeout_add(400, lambda: (self.refresh(), False)[1])
+
+    def error(self, msg):
+        d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.ERROR,
+                              buttons=Gtk.ButtonsType.CLOSE, text=msg)
+        d.run()
+        d.destroy()
+
+
+def main():
+    from gi.repository import Gdk
+    prov = Gtk.CssProvider()
+    prov.load_from_data(CSS)
+    Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), prov,
+                                             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    win = TaskManager()
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

@@ -84,6 +84,9 @@ pipewire-pulse
 pipewire-alsa
 wireplumber
 
+# --- boot splash ---
+plymouth
+
 # --- fonts ---
 ttf-dejavu
 ttf-liberation

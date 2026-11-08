@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Task Manager
+Comment=See running programs and end ones that stopped responding
+Exec=termos-taskmgr
+Icon=utilities-system-monitor
+Categories=System;Monitor;
