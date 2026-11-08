@@ -31,12 +31,12 @@ case "${1:-start}" in
         args+=(before-sleep "termos-idle undim" after-resume "wlopm --on '*'")
         setsid -f swayidle "${args[@]}" >/dev/null 2>&1 ;;
     dim)
-        cur=$(brightnessctl -m 2>/dev/null | cut -d, -f3) || exit 0
+        cur=$(brightnessctl -c backlight -m 2>/dev/null | cut -d, -f3) || exit 0
         [ -n "$cur" ] || exit 0
         echo "$cur" > "$saved"
-        brightnessctl -q set 10% ;;
+        brightnessctl -c backlight -q set 10% ;;
     undim)
-        [ -f "$saved" ] && brightnessctl -q set "$(cat "$saved")" && rm -f "$saved" ;;
+        [ -f "$saved" ] && brightnessctl -c backlight -q set "$(cat "$saved")" && rm -f "$saved" ;;
     maybe-sleep)
         if [ "$2" = bat ] && on_battery; then systemctl suspend; fi
         if [ "$2" = ac ] && ! on_battery; then systemctl suspend; fi ;;

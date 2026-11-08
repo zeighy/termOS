@@ -121,7 +121,7 @@ Tap ⚙ in the panel, or open *Settings* from the apps tray.
 
 | Page      | What you can change |
 |-----------|---------------------|
-| Display   | brightness, display size (100–200 %), auto-rotate, rotate, flip auto-rotate, open apps full-screen |
+| Display   | brightness; **resolution and scale (100–300 %) for every connected screen**; auto-rotate, rotate, flip auto-rotate (built-in screens); open apps full-screen |
 | Power     | power mode, battery health, automatic battery saver, dim / screen-off / sleep timers, power button |
 | Sound     | volume, mute |
 | Wallpaper | built-in or own pictures (`~/Pictures/Wallpapers`), any image, or a plain colour |
@@ -133,6 +133,17 @@ Settings that need admin rights (SSH server, hostname, timezone and
 power button) go through `/usr/local/bin/termos-root-helper`. sudo
 allows the wheel group to run only that script without a password, and
 the script accepts only those specific, validated commands.
+
+### Screens, resolution and scaling
+
+Settings › Display lists every connected screen (built-in, external or a
+desktop monitor), each with its own **Resolution** and **Scale**. After
+a change, a dialog asks whether to keep it and **reverts automatically
+after 15 seconds**. A wrong mode can't leave you with a black screen.
+The choices are saved in `~/.config/termos/outputs.conf`
+(`<output> <mode|auto> <scale>`) and applied at every login by
+`termos-outputs`. A monitor plugged in after login uses its default
+mode until the next login.
 
 ### Power modes
 

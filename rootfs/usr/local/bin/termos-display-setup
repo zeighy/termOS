@@ -1,5 +1,6 @@
 #!/bin/bash
 # termOS: run once per login from labwc autostart.
+#  - applies saved resolution/scale for every screen (termos-outputs)
 #  - finds the built-in panel (eDP/DSI/LVDS)
 #  - points the touch screen and pen at it (so both follow rotation)
 #  - creates ~/.config/termos/display.conf on first run (portrait-native
@@ -9,6 +10,7 @@ conf="$HOME/.config/termos/display.conf"
 rc="$HOME/.config/labwc/rc.xml"
 
 for _ in 1 2 3 4 5 6 7 8 9 10; do wlr-randr >/dev/null 2>&1 && break; sleep 0.3; done
+termos-outputs apply
 panel=$(wlr-randr | awk '/^[^ \t]/{print $1}' | grep -E '^(eDP|DSI|LVDS)' | head -n1)
 [ -n "$panel" ] || exit 0   # no built-in screen (desktop PC): nothing to do
 
@@ -36,8 +38,6 @@ ROT=0
 AUTO=1
 # Set to 180 if auto-rotate shows the screen upside down
 SENSOR_OFFSET=0
-# Display size (1, 1.25, 1.5, 1.75, 2)
-SCALE=1
 CONF
 fi
 

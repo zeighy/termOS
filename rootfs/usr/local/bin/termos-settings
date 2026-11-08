@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """termOS Settings - a small, touch-friendly settings app (GTK3)."""
 import glob
+import json
 import os
 import re
 import shlex
@@ -19,6 +20,8 @@ HOME = os.path.expanduser("~")
 CFG = os.path.join(HOME, ".config", "termos")
 DISPLAY_CONF = os.path.join(CFG, "display.conf")
 SETTINGS_CONF = os.path.join(CFG, "settings.conf")
+OUTPUTS_CONF = os.path.join(CFG, "outputs.conf")
+SCALES = ["1", "1.25", "1.5", "1.75", "2", "2.5", "3"]
 WALLPAPER_DIRS = ["/usr/share/backgrounds/termos", os.path.join(HOME, "Pictures", "Wallpapers")]
 DEFAULT_WALLPAPER = "/usr/share/backgrounds/termos/default.png"
 LAYOUTS = ["us", "gb", "de", "fr", "es", "it", "pt", "br", "ca", "ch", "be", "nl",
@@ -90,6 +93,34 @@ def write_conf(path, key, value):
         lines.append(new)
     with open(path, "w") as f:
         f.writelines(lines)
+
+
+def read_outputs():
+    """outputs.conf: '<output> <mode|auto> <scale>' per line."""
+    res = {}
+    try:
+        with open(OUTPUTS_CONF) as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) == 3 and not line.startswith("#"):
+                    res[parts[0]] = (parts[1], parts[2])
+    except OSError:
+        pass
+    return res
+
+
+def save_output(name, mode, scale):
+    outs = read_outputs()
+    outs[name] = (mode, scale)
+    os.makedirs(CFG, exist_ok=True)
+    with open(OUTPUTS_CONF, "w") as f:
+        f.write("# termOS screens: <output> <mode|auto> <scale>  (written by Settings)\n")
+        for n, (m, sc) in sorted(outs.items()):
+            f.write(f"{n} {m} {sc}\n")
+
+
+def fmt_scale(x):
+    return f"{float(x):g}"
 
 
 def root_helper(*args):
@@ -199,29 +230,19 @@ class Settings(Gtk.Window):
     def display_page(self):
         sw, b = page()
         section(b, "Screen")
-        r = run("brightnessctl", "-m")
+        r = run("brightnessctl", "-c", "backlight", "-m")
         try:
             cur = int(r.stdout.strip().split(",")[3].rstrip("%"))
         except (IndexError, ValueError):
             cur = None
         if cur is not None:
             row(b, "Brightness",
-                slider(5, 100, cur, lambda v: run("brightnessctl", "-q", "set", f"{v}%")))
+                slider(5, 100, cur, lambda v: run("brightnessctl", "-c", "backlight", "-q", "set", f"{v}%")))
+
+        self.screens_ui(b)
 
         dconf = read_conf(DISPLAY_CONF)
         if dconf.get("PANEL"):
-            scales = ["1", "1.25", "1.5", "1.75", "2"]
-            combo = Gtk.ComboBoxText()
-            for s in scales:
-                combo.append(s, f"{int(float(s) * 100)} %")
-            combo.set_active_id(dconf.get("SCALE", "1") if dconf.get("SCALE", "1") in scales else "1")
-
-            def set_scale(c):
-                write_conf(DISPLAY_CONF, "SCALE", c.get_active_id())
-                spawn("termos-rotate", "apply")
-            combo.connect("changed", set_scale)
-            row(b, "Display size", combo, "Makes everything bigger or smaller")
-
             section(b, "Rotation")
             auto = Gtk.Switch(active=dconf.get("AUTO", "1") == "1")
             auto.connect("notify::active",
@@ -257,6 +278,117 @@ class Settings(Gtk.Window):
         row(b, "Open apps full-screen", maxi,
             "Apps fill the screen and shrink when the on-screen keyboard appears")
         self.stack.add_titled(sw, "display", "Display")
+
+    # ---- Screens (every machine) -----------------------------------------
+    def confirm_keep(self):
+        """Ask to keep a new display setting; revert automatically after 15 s."""
+        dlg = Gtk.MessageDialog(transient_for=self, modal=True,
+                                message_type=Gtk.MessageType.QUESTION,
+                                text="Keep these display settings?")
+        dlg.add_buttons("Revert", Gtk.ResponseType.CANCEL, "Keep", Gtk.ResponseType.OK)
+        left = {"n": 15, "tid": 0}
+
+        def tick():
+            left["n"] -= 1
+            if left["n"] <= 0:
+                left["tid"] = 0
+                dlg.response(Gtk.ResponseType.CANCEL)
+                return False
+            dlg.format_secondary_text(f"Reverting in {left['n']} seconds.")
+            return True
+        dlg.format_secondary_text(f"Reverting in {left['n']} seconds.")
+        left["tid"] = GLib.timeout_add(1000, tick)
+        resp = dlg.run()
+        if left["tid"]:
+            GLib.source_remove(left["tid"])
+        dlg.destroy()
+        return resp == Gtk.ResponseType.OK
+
+    def screens_ui(self, b):
+        try:
+            outs = [o for o in json.loads(run("wlr-randr", "--json").stdout)
+                    if o.get("enabled", True)]
+        except (ValueError, TypeError):
+            outs = []
+        for o in outs:
+            name = o.get("name", "?")
+            if re.match(r"(eDP|DSI|LVDS)", name):
+                title = "Built-in screen"
+            else:
+                title = " ".join(x for x in (o.get("make"), o.get("model"))
+                                 if x and x.lower() != "unknown") or "Screen"
+            section(b, f"{title} ({name})")
+            state = {"mode": None, "scale": fmt_scale(o.get("scale", 1)), "busy": False}
+            preferred = None
+
+            # --- resolution
+            modes, seen = [], set()
+            for m in o.get("modes", []):
+                key = (m["width"], m["height"], round(m["refresh"], 2))
+                if key in seen:
+                    continue
+                seen.add(key)
+                ms = f"{m['width']}x{m['height']}@{m['refresh']:.3f}Hz"
+                modes.append((m, ms))
+                if m.get("current"):
+                    state["mode"] = ms
+                if m.get("preferred"):
+                    preferred = ms
+            modes.sort(key=lambda t: (t[0]["width"] * t[0]["height"], t[0]["refresh"]), reverse=True)
+            if modes:
+                mc = Gtk.ComboBoxText()
+                for m, ms in modes:
+                    txt = f"{m['width']} × {m['height']}"
+                    if m["refresh"] >= 1:
+                        txt += f"  ({m['refresh']:.0f} Hz)"
+                    if ms == preferred:
+                        txt += "  · recommended"
+                    mc.append(ms, txt)
+                if state["mode"]:
+                    mc.set_active_id(state["mode"])
+
+                def on_mode(c, name=name, state=state, preferred=preferred):
+                    new = c.get_active_id()
+                    if state["busy"] or not new or new == state["mode"]:
+                        return
+                    run("wlr-randr", "--output", name, "--mode", new)
+                    if self.confirm_keep():
+                        state["mode"] = new
+                        save_output(name, "auto" if new == preferred else new, state["scale"])
+                    else:
+                        if state["mode"]:
+                            run("wlr-randr", "--output", name, "--mode", state["mode"])
+                        state["busy"] = True
+                        c.set_active_id(state["mode"])
+                        state["busy"] = False
+                mc.connect("changed", on_mode)
+                row(b, "Resolution", mc, "Higher shows more; the recommended one is sharpest")
+
+            # --- scale
+            sc = Gtk.ComboBoxText()
+            options = SCALES if state["scale"] in SCALES else SCALES + [state["scale"]]
+            for x in options:
+                sc.append(x, f"{round(float(x) * 100)} %")
+            sc.set_active_id(state["scale"])
+
+            def on_scale(c, name=name, state=state):
+                new = c.get_active_id()
+                if state["busy"] or not new or new == state["scale"]:
+                    return
+                run("wlr-randr", "--output", name, "--scale", new)
+                if self.confirm_keep():
+                    state["scale"] = new
+                    mode = read_outputs().get(name, ("auto", ""))[0]
+                    save_output(name, mode, new)
+                else:
+                    run("wlr-randr", "--output", name, "--scale", state["scale"])
+                    state["busy"] = True
+                    c.set_active_id(state["scale"])
+                    state["busy"] = False
+            sc.connect("changed", on_scale)
+            row(b, "Scale", sc, "Makes text, buttons and windows bigger or smaller")
+        if not outs:
+            row(b, "Screens", label("Could not read screen information", "row-sub", xalign=1.0))
 
     # ---- Power -----------------------------------------------------------
     def power_page(self):

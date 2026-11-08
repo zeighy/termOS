@@ -1,0 +1,32 @@
+#!/bin/bash
+# termOS: saved resolution + scale for every screen (built-in or external).
+#   termos-outputs apply      apply ~/.config/termos/outputs.conf to connected screens
+# outputs.conf lines:  <output> <mode|auto> <scale>
+#   e.g.  HDMI-A-1 1920x1080@60.000Hz 1.25
+#         eDP-1    auto               1.5
+# Written by Settings > Display. "auto" keeps the screen's preferred mode.
+conf="$HOME/.config/termos/outputs.conf"
+dconf="$HOME/.config/termos/display.conf"
+
+case "${1:-apply}" in
+    apply)
+        # older termOS kept the built-in panel's scale in display.conf
+        PANEL=""; SCALE=""
+        [ -f "$dconf" ] && . "$dconf"
+        connected=$(wlr-randr 2>/dev/null | awk '/^[^ \t]/{print $1}')
+        for out in $connected; do
+            mode=""; scale=""
+            if [ -f "$conf" ]; then
+                read -r _ mode scale < <(awk -v o="$out" '$1==o {print; exit}' "$conf")
+            fi
+            if [ -z "$scale" ] && [ "$out" = "$PANEL" ] && [ -n "$SCALE" ]; then
+                scale=$SCALE
+            fi
+            args=()
+            [ -n "$mode" ] && [ "$mode" != auto ] && args+=(--mode "$mode")
+            [ -n "$scale" ] && args+=(--scale "$scale")
+            (( ${#args[@]} )) && wlr-randr --output "$out" "${args[@]}"
+        done ;;
+    *) echo "usage: termos-outputs apply" >&2; exit 1 ;;
+esac
+exit 0

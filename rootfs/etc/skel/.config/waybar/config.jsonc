@@ -44,8 +44,8 @@
     "backlight": {
         "format": "☀ {percent}%",
         "on-click": "termos-brightness cycle",
-        "on-scroll-up": "brightnessctl set +5%",
-        "on-scroll-down": "brightnessctl set 5%-"
+        "on-scroll-up": "brightnessctl -c backlight set +5%",
+        "on-scroll-down": "brightnessctl -c backlight set 5%-"
     },
     "pulseaudio": {
         "format": "🔊 {volume}%",
