@@ -24,6 +24,9 @@ sudo pacman -Syu
 | Text / images     | `mousepad`, `ristretto`                      |
 | Video / music     | `mpv`, `parole`                              |
 | Settings          | `termos-settings` (GTK3, touch-friendly)     |
+| Task Manager      | `termos-taskmgr` (end/force-quit apps; `Ctrl+Shift+Esc`) |
+| Performance       | `termos-perfmon` (CPU, memory, disk, network, battery graphs) |
+| Boot splash       | `plymouth` with the termOS logo and spinner (`artwork/make-splash.py` regenerates the images) |
 | SSH hosts         | `termos-ssh` (one-tap hosts from `~/.ssh/config`, mosh option) |
 | Power             | `termos-power-profile` (saver / balanced / performance), `swayidle` + `wlopm` |
 | Notifications     | `mako`                                       |
@@ -125,7 +128,7 @@ Tap ⚙ in the panel, or open *Settings* from the apps tray.
 | Power     | power mode, battery health, automatic battery saver, dim / screen-off / sleep timers, power button |
 | Sound     | volume, mute |
 | Wallpaper | built-in or own pictures (`~/Pictures/Wallpapers`), any image, or a plain colour |
-| Keyboard  | hardware keyboard layout, show/hide on-screen keyboard |
+| Keyboard & Touchpad | hardware keyboard layout, scroll direction, show/hide on-screen keyboard |
 | Network   | Wi-Fi connections, IP address, SSH server, Bluetooth, Tailscale |
 | System    | hostname, timezone, update, device info |
 

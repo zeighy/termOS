@@ -7,6 +7,7 @@ WALLPAPER=/usr/share/backgrounds/termos/default.png
 WALLPAPER_COLOR=""
 MAXIMIZE=1
 KEYBOARD_LAYOUT=""
+NATURAL_SCROLL=0
 [ -f "$conf" ] && . "$conf"
 rc="$HOME/.config/labwc/rc.xml"
 envf="$HOME/.config/labwc/environment"
@@ -44,8 +45,20 @@ keyboard() {
     fi
 }
 
+touchpad() {
+    # naturalScroll in the touchpad block of rc.xml: 0 = normal, 1 = inverted
+    # ("natural", like a phone: content follows the fingers).
+    [ -f "$rc" ] || return 0
+    local want=no; [ "$NATURAL_SCROLL" = 1 ] && want=yes
+    if ! grep -q "<naturalScroll>$want</naturalScroll>" "$rc"; then
+        sed -i "s|<naturalScroll>[a-z]*</naturalScroll>|<naturalScroll>$want</naturalScroll>|" "$rc"
+        reconf=1
+    fi
+}
+
 case "${1:-all}" in
-    all) wallpaper; windows; keyboard ;;
+    all) wallpaper; windows; keyboard; touchpad ;;
+    touchpad) touchpad ;;
     wallpaper) wallpaper ;;
     windows) windows ;;
     keyboard) keyboard ;;

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Performance Monitor
+Comment=Live CPU, memory, disk, network and battery graphs
+Exec=termos-perfmon
+Icon=org.gnome.SystemMonitor
+Categories=System;Monitor;

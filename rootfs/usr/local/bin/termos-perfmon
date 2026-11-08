@@ -1,0 +1,375 @@
+#!/usr/bin/env python3
+"""termOS Performance Monitor - live CPU, memory, disk, network and battery graphs (GTK3 + cairo)."""
+import glob
+import os
+import re
+from collections import deque
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+
+HISTORY = 60  # seconds shown
+CSS = b"""
+window, .background { font-size: 15px; }
+.card-title { font-size: 13px; font-weight: bold; opacity: 0.65; }
+.card-value { font-size: 26px; font-weight: bold; }
+.card-sub { font-size: 12px; opacity: 0.7; }
+stacksidebar row { padding: 16px 20px; font-size: 16px; }
+"""
+COLORS = {"cpu": (0.54, 0.71, 0.98), "mem": (0.65, 0.89, 0.63), "disk": (0.98, 0.70, 0.53),
+          "net": (0.80, 0.65, 0.97), "bat": (0.98, 0.89, 0.69), "temp": (0.95, 0.55, 0.66)}
+
+
+def slurp(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def rate(b):
+    for unit in ("B/s", "kB/s", "MB/s", "GB/s"):
+        if b < 1024 or unit == "GB/s":
+            return f"{b:.0f} {unit}" if unit == "B/s" else f"{b:.1f} {unit}"
+        b /= 1024
+
+
+def size(kb):
+    return f"{kb / 1024 / 1024:.1f} GB" if kb >= 1024 * 1024 else f"{kb / 1024:.0f} MB"
+
+
+class Graph(Gtk.DrawingArea):
+    """Scrolling line graph. fixed_max=None autoscales (for throughput)."""
+
+    def __init__(self, color, fixed_max=100.0, series=1):
+        super().__init__()
+        self.color = color
+        self.fixed_max = fixed_max
+        self.data = [deque([0.0] * HISTORY, maxlen=HISTORY) for _ in range(series)]
+        self.set_size_request(-1, 140)
+        self.set_hexpand(True)
+        self.connect("draw", self.on_draw)
+
+    def push(self, *vals):
+        for d, v in zip(self.data, vals):
+            d.append(v)
+        self.queue_draw()
+
+    def on_draw(self, _w, cr):
+        w, h = self.get_allocated_width(), self.get_allocated_height()
+        r, g, b = self.color
+        cr.set_source_rgba(r, g, b, 0.08)
+        cr.rectangle(0, 0, w, h)
+        cr.fill()
+        cr.set_source_rgba(r, g, b, 0.22)
+        cr.set_line_width(1)
+        for i in range(1, 4):
+            y = round(h * i / 4) + 0.5
+            cr.move_to(0, y)
+            cr.line_to(w, y)
+        cr.stroke()
+        top = self.fixed_max or max(1024.0, max(max(d) for d in self.data) * 1.15)
+        for n, d in enumerate(self.data):
+            pts = [(w * i / (HISTORY - 1), h - min(v / top, 1.0) * (h - 2) - 1) for i, v in enumerate(d)]
+            alpha = 1.0 if n == 0 else 0.6
+            cr.move_to(*pts[0])
+            for p in pts[1:]:
+                cr.line_to(*p)
+            cr.set_source_rgba(r, g, b, alpha)
+            cr.set_line_width(2.5)
+            cr.stroke_preserve()
+            if n == 0:
+                cr.line_to(w, h)
+                cr.line_to(0, h)
+                cr.close_path()
+                cr.set_source_rgba(r, g, b, 0.18)
+                cr.fill()
+        if not self.fixed_max:
+            cr.set_source_rgba(1, 1, 1, 0.45)
+            cr.set_font_size(11)
+            cr.move_to(6, 14)
+            cr.show_text(rate(top))
+        return False
+
+
+class Cores(Gtk.DrawingArea):
+    """One thin bar per CPU core."""
+
+    def __init__(self, n):
+        super().__init__()
+        self.n = n
+        self.vals = [0.0] * n
+        self.set_size_request(-1, 26 * ((n + 1) // 2) + 6)
+        self.connect("draw", self.on_draw)
+
+    def on_draw(self, _w, cr):
+        w = self.get_allocated_width()
+        cols = 2 if self.n > 1 else 1
+        cw = (w - 12 * (cols - 1)) / cols
+        r, g, b = COLORS["cpu"]
+        for i, v in enumerate(self.vals):
+            x = (i % cols) * (cw + 12)
+            y = (i // cols) * 26 + 3
+            cr.set_source_rgba(r, g, b, 0.15)
+            cr.rectangle(x, y, cw, 18)
+            cr.fill()
+            cr.set_source_rgba(r, g, b, 0.9)
+            cr.rectangle(x, y, cw * v / 100, 18)
+            cr.fill()
+            cr.set_source_rgba(1, 1, 1, 0.85)
+            cr.set_font_size(11)
+            cr.move_to(x + 6, y + 13)
+            cr.show_text(f"core {i}   {v:.0f}%")
+        return False
+
+
+def card(title):
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+    box.set_border_width(16)
+    t = Gtk.Label(label=title, xalign=0)
+    t.get_style_context().add_class("card-title")
+    box.pack_start(t, False, False, 0)
+    return box
+
+
+def value_label(css="card-value"):
+    lab = Gtk.Label(xalign=0)
+    lab.get_style_context().add_class(css)
+    return lab
+
+
+class PerfMon(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="Performance Monitor")
+        self.set_default_size(900, 640)
+        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
+        side = Gtk.StackSidebar(stack=self.stack)
+        side.set_size_request(190, -1)
+        root = Gtk.Box()
+        root.pack_start(side, False, False, 0)
+        root.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), False, False, 0)
+        root.pack_start(self.stack, True, True, 0)
+        self.add(root)
+
+        self.ncpu = os.cpu_count() or 1
+        self.prev_cpu = None
+        self.prev_disk = None
+        self.prev_net = None
+        self.cpu_model = re.sub(r"\s+", " ", (re.search(r"model name\s*:\s*(.*)", slurp("/proc/cpuinfo")) or
+                                              [0, "CPU"])[1])
+        self.build_cpu()
+        self.build_mem()
+        self.build_disk()
+        self.build_net()
+        self.bat = next(iter(glob.glob("/sys/class/power_supply/BAT*")), None)
+        if self.bat:
+            self.build_battery()
+        self.last = GLib.get_monotonic_time()
+        self.tick()
+        GLib.timeout_add(1000, self.tick)
+
+    def add_page(self, name, title, box):
+        sw = Gtk.ScrolledWindow()
+        sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sw.add(box)
+        self.stack.add_titled(sw, name, title)
+
+    # ---- pages -----------------------------------------------------------
+    def build_cpu(self):
+        b = card(f"CPU   {self.cpu_model}")
+        self.cpu_val = value_label()
+        self.cpu_sub = value_label("card-sub")
+        self.cpu_graph = Graph(COLORS["cpu"])
+        self.cores = Cores(self.ncpu)
+        for w in (self.cpu_val, self.cpu_graph, self.cpu_sub, self.cores):
+            b.pack_start(w, False, False, 4)
+        self.add_page("cpu", "CPU", b)
+
+    def build_mem(self):
+        b = card("Memory")
+        self.mem_val = value_label()
+        self.mem_sub = value_label("card-sub")
+        self.mem_graph = Graph(COLORS["mem"])
+        self.swap_title = Gtk.Label(label="Swap / zram", xalign=0)
+        self.swap_title.get_style_context().add_class("card-title")
+        self.swap_val = value_label("card-sub")
+        self.swap_graph = Graph(COLORS["mem"])
+        for w in (self.mem_val, self.mem_graph, self.mem_sub, self.swap_title, self.swap_graph, self.swap_val):
+            b.pack_start(w, False, False, 4)
+        self.add_page("mem", "Memory", b)
+
+    def build_disk(self):
+        b = card("Disk")
+        self.disk_val = value_label()
+        self.disk_sub = value_label("card-sub")
+        self.disk_graph = Graph(COLORS["disk"], None, 2)
+        for w in (self.disk_val, self.disk_graph, self.disk_sub):
+            b.pack_start(w, False, False, 4)
+        self.add_page("disk", "Disk", b)
+
+    def build_net(self):
+        b = card("Network")
+        self.net_val = value_label()
+        self.net_sub = value_label("card-sub")
+        self.net_graph = Graph(COLORS["net"], None, 2)
+        for w in (self.net_val, self.net_graph, self.net_sub):
+            b.pack_start(w, False, False, 4)
+        self.add_page("net", "Network", b)
+
+    def build_battery(self):
+        b = card("Battery")
+        self.bat_val = value_label()
+        self.bat_sub = value_label("card-sub")
+        self.bat_graph = Graph(COLORS["bat"])
+        for w in (self.bat_val, self.bat_graph, self.bat_sub):
+            b.pack_start(w, False, False, 4)
+        self.add_page("bat", "Battery", b)
+
+    # ---- sampling --------------------------------------------------------
+    def tick(self):
+        now = GLib.get_monotonic_time()
+        dt = max((now - self.last) / 1e6, 0.1)
+        self.last = now
+        self.sample_cpu()
+        self.sample_mem()
+        self.sample_disk(dt)
+        self.sample_net(dt)
+        if self.bat:
+            self.sample_bat()
+        return True
+
+    def sample_cpu(self):
+        cur = []
+        for line in slurp("/proc/stat").splitlines():
+            if line.startswith("cpu"):
+                f = line.split()
+                v = [int(x) for x in f[1:9]]
+                cur.append((sum(v), v[3] + v[4]))  # total, idle+iowait
+        if self.prev_cpu and len(cur) == len(self.prev_cpu):
+            pct = []
+            for (t, i), (pt, pi) in zip(cur, self.prev_cpu):
+                dt_ = max(t - pt, 1)
+                pct.append(100.0 * (1 - (i - pi) / dt_))
+            total, per = pct[0], pct[1:]
+            self.cpu_graph.push(total)
+            self.cpu_val.set_text(f"{total:.0f}%")
+            if len(per) == self.ncpu:
+                self.cores.vals = per
+                self.cores.queue_draw()
+            freqs = []
+            for p in glob.glob("/sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq"):
+                try:
+                    freqs.append(int(slurp(p)) / 1000)
+                except ValueError:
+                    pass
+            parts = [f"load {' '.join(slurp('/proc/loadavg').split()[:3])}"]
+            if freqs:
+                parts.append(f"speed {sum(freqs) / len(freqs) / 1000:.2f} GHz")
+            temp = self.temperature()
+            if temp:
+                parts.append(f"{temp:.0f} °C")
+            self.cpu_sub.set_text("   ·   ".join(parts) + f"   ·   {self.ncpu} threads")
+        self.prev_cpu = cur
+
+    @staticmethod
+    def temperature():
+        best = 0.0
+        for z in glob.glob("/sys/class/thermal/thermal_zone*/temp"):
+            try:
+                best = max(best, int(slurp(z)) / 1000)
+            except ValueError:
+                pass
+        return best
+
+    def sample_mem(self):
+        m = {}
+        for line in slurp("/proc/meminfo").splitlines():
+            k, _, v = line.partition(":")
+            m[k] = int(v.split()[0]) if v.split() else 0
+        tot = m.get("MemTotal", 1)
+        used = tot - m.get("MemAvailable", 0)
+        self.mem_graph.push(100.0 * used / tot)
+        self.mem_val.set_text(f"{100.0 * used / tot:.0f}%")
+        self.mem_sub.set_text(f"{size(used)} used of {size(tot)}   ·   cached {size(m.get('Cached', 0))}"
+                              f"   ·   available {size(m.get('MemAvailable', 0))}")
+        st, sf = m.get("SwapTotal", 0), m.get("SwapFree", 0)
+        if st:
+            self.swap_graph.push(100.0 * (st - sf) / st)
+            self.swap_val.set_text(f"{size(st - sf)} used of {size(st)}")
+        else:
+            self.swap_graph.push(0)
+            self.swap_val.set_text("no swap")
+
+    def sample_disk(self, dt):
+        rd = wr = 0
+        for line in slurp("/proc/diskstats").splitlines():
+            f = line.split()
+            if len(f) > 9 and re.fullmatch(r"(sd[a-z]+|vd[a-z]+|nvme\d+n\d+|mmcblk\d+)", f[2]):
+                rd += int(f[5]) * 512
+                wr += int(f[9]) * 512
+        if self.prev_disk:
+            r, w = (rd - self.prev_disk[0]) / dt, (wr - self.prev_disk[1]) / dt
+            self.disk_graph.push(r, w)
+            self.disk_val.set_text(f"read {rate(r)}   write {rate(w)}")
+            st = os.statvfs("/")
+            tot = st.f_blocks * st.f_frsize
+            free = st.f_bavail * st.f_frsize
+            self.disk_sub.set_text(f"/ : {(tot - free) / 1e9:.1f} GB used of {tot / 1e9:.1f} GB"
+                                   "   ·   lighter line = writes")
+        self.prev_disk = (rd, wr)
+
+    def sample_net(self, dt):
+        rx = tx = 0
+        for line in slurp("/proc/net/dev").splitlines()[2:]:
+            name, _, rest = line.partition(":")
+            if name.strip() == "lo":
+                continue
+            f = rest.split()
+            rx += int(f[0])
+            tx += int(f[8])
+        if self.prev_net:
+            d, u = max(rx - self.prev_net[0], 0) / dt, max(tx - self.prev_net[1], 0) / dt
+            self.net_graph.push(d, u)
+            self.net_val.set_text(f"↓ {rate(d)}   ↑ {rate(u)}")
+            self.net_sub.set_text(f"received {rx / 1e6:.0f} MB   ·   sent {tx / 1e6:.0f} MB since boot"
+                                  "   ·   lighter line = upload")
+        self.prev_net = (rx, tx)
+
+    def sample_bat(self):
+        cap = slurp(f"{self.bat}/capacity", "0")
+        status = slurp(f"{self.bat}/status", "?")
+        try:
+            self.bat_graph.push(float(cap))
+        except ValueError:
+            return
+        self.bat_val.set_text(f"{cap}%   {status}")
+        parts = []
+        pw = slurp(f"{self.bat}/power_now")
+        if pw.isdigit():
+            parts.append(f"{int(pw) / 1e6:.1f} W")
+        full, design = slurp(f"{self.bat}/energy_full"), slurp(f"{self.bat}/energy_full_design")
+        if full.isdigit() and design.isdigit() and int(design):
+            parts.append(f"health {100 * int(full) // int(design)}%")
+        m = re.search(r"^ACTIVE=(\S+)", slurp("/etc/termos/power.conf"), re.M)
+        if m:
+            parts.append(f"power mode: {m.group(1)}")
+        self.bat_sub.set_text("   ·   ".join(p for p in parts if p))
+
+
+def main():
+    prov = Gtk.CssProvider()
+    prov.load_from_data(CSS)
+    Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), prov,
+                                             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    win = PerfMon()
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,38 @@
+# termOS boot splash: centred logo, name, rotating spinner on the dark background.
+Window.SetBackgroundTopColor(0.067, 0.067, 0.106);     # #11111b
+Window.SetBackgroundBottomColor(0.118, 0.118, 0.180);  # #1e1e2e
+
+sw = Window.GetWidth();
+sh = Window.GetHeight();
+# scale for small/large panels: logo is 280px wide at 1280px-wide screens
+k = Math.Min(sw, sh) / 800;
+if (k < 0.6) k = 0.6;
+if (k > 2.0) k = 2.0;
+
+logo.image = Image("logo.png");
+logo.image = logo.image.Scale(logo.image.GetWidth() * k, logo.image.GetHeight() * k);
+logo.sprite = Sprite(logo.image);
+logo.sprite.SetX(sw / 2 - logo.image.GetWidth() / 2);
+logo.sprite.SetY(sh / 2 - logo.image.GetHeight() / 2 - 50 * k);
+
+name.image = Image.Text("termOS", 0.804, 0.839, 0.957, 1, "Sans Bold " + Math.Int(30 * k));
+name.sprite = Sprite(name.image);
+name.sprite.SetX(sw / 2 - name.image.GetWidth() / 2);
+name.sprite.SetY(sh / 2 + 110 * k - 50 * k);
+
+spin.base = Image("spinner.png");
+spin.base = spin.base.Scale(spin.base.GetWidth() * k * 0.7, spin.base.GetHeight() * k * 0.7);
+spin.sprite = Sprite();
+spin.sprite.SetX(sw / 2 - spin.base.GetWidth() / 2);
+spin.sprite.SetY(sh / 2 + 170 * k - 50 * k);
+spin.angle = 0;
+
+fun refresh() {
+    spin.angle += 0.11;   # radians per frame (~50 fps)
+    spin.sprite.SetImage(spin.base.Rotate(spin.angle));
+}
+Plymouth.SetRefreshFunction(refresh);
+
+# Boot messages / passwords are not expected on termOS; show nothing extra.
+fun message_callback(text) { }
+Plymouth.SetMessageFunction(message_callback);

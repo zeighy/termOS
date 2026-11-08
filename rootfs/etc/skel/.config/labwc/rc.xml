@@ -48,6 +48,7 @@
     <keybind key="Print"><action name="Execute" command="termos-screenshot full" /></keybind>
     <keybind key="S-Print"><action name="Execute" command="termos-screenshot area" /></keybind>
     <keybind key="W-k"><action name="Execute" command="termos-osk toggle" /></keybind>
+    <keybind key="C-S-Escape"><action name="Execute" command="termos-taskmgr" /></keybind>
     <keybind key="W-q"><action name="Close" /></keybind>
     <keybind key="W-Up"><action name="ToggleMaximize" /></keybind>
     <keybind key="W-space"><action name="ShowMenu" menu="root-menu" /></keybind>

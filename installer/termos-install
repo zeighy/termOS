@@ -193,7 +193,7 @@ ln -sf "/usr/share/zoneinfo/$TZONE" "$MNT/etc/localtime"
 
 # fast boot: systemd-based initramfs, no fallback image
 cat > "$MNT/etc/mkinitcpio.conf.d/termos.conf" <<'EOF'
-HOOKS=(systemd autodetect microcode modconf kms keyboard sd-vconsole block filesystems fsck)
+HOOKS=(systemd autodetect microcode modconf kms plymouth keyboard sd-vconsole block filesystems fsck)
 COMPRESSION="zstd"
 EOF
 sed -i "s/^PRESETS=.*/PRESETS=('default')/" "$MNT/etc/mkinitcpio.d/linux.preset"
@@ -230,7 +230,7 @@ cat > "$MNT/boot/loader/entries/termos.conf" <<EOF
 title   termOS
 linux   /vmlinuz-linux
 initrd  /initramfs-linux.img
-options root=UUID=$root_uuid rw quiet loglevel=3 rd.udev.log_level=3 systemd.show_status=auto nowatchdog
+options root=UUID=$root_uuid rw quiet splash loglevel=3 rd.udev.log_level=3 systemd.show_status=auto nowatchdog
 EOF
 
 # keep the installed system small: drop the copied package cache
