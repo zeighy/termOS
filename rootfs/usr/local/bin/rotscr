@@ -1,0 +1,22 @@
+#!/bin/bash
+# rotscr: turn the text console (and the termOS installer) on its side.
+#   rotscr            turn it 90 degrees further (run it again until it's upright)
+#   rotscr normal | right | flip | left    (or 0 | 1 | 2 | 3)
+# The choice is kept: on the installed system for every start, on the live USB
+# until it powers off (and the installer copies it to the new system).
+if [ "$(id -u)" != 0 ]; then exec sudo "$0" "$@"; fi
+fb=/sys/class/graphics/fbcon
+[ -w "$fb/rotate_all" ] || { echo "rotscr: this screen can't be turned (no framebuffer console)" >&2; exit 1; }
+now=$(cat "$fb/rotate" 2>/dev/null || echo 0)
+case "${1:-next}" in
+    next) to=$(( (now + 1) % 4 )) ;;
+    0|normal) to=0 ;; 1|right) to=1 ;; 2|flip) to=2 ;; 3|left) to=3 ;;
+    -h|--help) sed -n '2,7p' "$0"; exit 0 ;;
+    *) echo "usage: rotscr [normal|right|flip|left]" >&2; exit 1 ;;
+esac
+echo "$to" > "$fb/rotate_all"
+if [ -d /run/archiso ]; then keep=/run/termos/console-rotation; else keep=/etc/termos/console-rotation; fi
+mkdir -p "${keep%/*}" && echo "$to" > "$keep"
+names=(normal right "upside down" left)
+clear
+echo "Screen turned: ${names[$to]}. Not upright yet? Run rotscr again."

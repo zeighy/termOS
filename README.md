@@ -62,18 +62,20 @@ sudo dd if=out/termos-*.iso of=/dev/sdX bs=4M status=progress oflag=sync
 
 1. In the tablet's firmware setup (Lenovo: power + Volume Up, or the Novo
    button): **disable Secure Boot**, boot from USB.
-2. Attach the keyboard cover; at the root prompt run:
+2. Attach the keyboard cover. The USB opens the **termOS menu**:
+   - *Turn the screen*: the first entry. Pick it until the text is upright
+     (portrait tablet panels start turned clockwise; some need another turn).
+   - *Install termOS*: from the USB, no internet needed.
+   - *Install with the newest packages*: from the Arch mirrors (needs internet).
+   - *Connect to Wi-Fi*, *Open a terminal*, *Power off*, *Restart*.
 
-   ```sh
-   termos-install            # offline, from the USB
-   termos-install --online   # or: newest packages from the mirrors
-   ```
-   `--online` needs a network: the installer's Wi-Fi step connects you.
-   On tablets with a portrait panel the text is turned to landscape and
-   enlarged automatically.
+   In the terminal, `termos-menu` brings the menu back, `rotscr` turns the
+   screen 90 degrees per run (`rotscr normal|right|flip|left` picks one), and
+   `termos-install [--online]` starts the installer directly.
 3. Answer the questions in the menus: disk, device name, user, password,
    lock-screen PIN, time zone, keyboard layout, and optionally Wi-Fi (the
-   installed system joins the same network). Nothing is changed until you
+   installed system joins the same network, and keeps the screen turn you
+   chose). Nothing is changed until you
    confirm the summary; then **the selected disk is wiped completely.**
 4. Let it power off, then remove the USB (not before: the installer runs
    from it) and switch on. It boots to the lock screen; the PIN opens the
@@ -183,6 +185,10 @@ SENSOR_OFFSET=180   # add this if auto-rotate turns the screen upside down
 
 *Rotate 90°* in Quick Settings rotates and turns auto-rotate off. Tap
 *Auto-rotate* there to re-enable it.
+
+The text console (boot messages, ttys) follows its own setting: run
+`rotscr` until it is upright. The choice is kept in
+`/etc/termos/console-rotation`.
 
 ### Settings app
 
