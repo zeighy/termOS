@@ -1,291 +1,177 @@
 #!/usr/bin/env python3
-"""termOS Settings - a small, touch-friendly settings app (GTK3)."""
+"""termOS Settings - a touch-friendly settings app (GTK3).
+
+  termos-settings [display|power|lock|keys|wifi|network|sound|wallpaper|keyboard|system]
+"""
 import glob
-import json
 import os
 import re
-import shlex
 import shutil
-import socket
-import subprocess
+import sys
 
-import gi
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib", "termos"))
+from termosui import bluetooth, core, keyspage, netinfo, screens, ui, widgets  # noqa: E402
 
-gi.require_version("Gtk", "3.0")
-gi.require_version("Gdk", "3.0")
+import gi  # noqa: E402
+
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk  # noqa: E402
 
-HOME = os.path.expanduser("~")
-CFG = os.path.join(HOME, ".config", "termos")
-DISPLAY_CONF = os.path.join(CFG, "display.conf")
-SETTINGS_CONF = os.path.join(CFG, "settings.conf")
-OUTPUTS_CONF = os.path.join(CFG, "outputs.conf")
-SCALES = ["1", "1.25", "1.5", "1.75", "2", "2.5", "3"]
-WALLPAPER_DIRS = ["/usr/share/backgrounds/termos", os.path.join(HOME, "Pictures", "Wallpapers")]
+WALLPAPER_DIRS = ["/usr/share/backgrounds/termos", os.path.join(core.HOME, "Pictures", "Wallpapers")]
 DEFAULT_WALLPAPER = "/usr/share/backgrounds/termos/default.png"
-LAYOUTS = ["us", "gb", "de", "fr", "es", "it", "pt", "br", "ca", "ch", "be", "nl",
-           "se", "no", "dk", "fi", "pl", "cz", "hu", "ru", "ua", "tr", "jp", "latam"]
-
-CSS = b"""
-window, .background { font-size: 15px; }
-stacksidebar row { padding: 16px 20px; font-size: 16px; }
-.page { padding: 24px; }
-.section-title { font-size: 13px; font-weight: bold; opacity: 0.6; margin-top: 18px; }
-.row-label { font-size: 16px; }
-.row-sub { font-size: 12px; opacity: 0.6; }
-button { min-height: 44px; padding: 0 18px; }
-switch { min-width: 64px; min-height: 34px; }
-scale slider { min-width: 32px; min-height: 32px; }
-scale trough { min-height: 10px; }
-combobox button, entry { min-height: 44px; }
-.thumb { padding: 4px; border-radius: 8px; }
-.thumb-selected { background: @theme_selected_bg_color; }
-"""
+LAYOUTS = [
+    ("us", "English (US)"), ("gb", "English (UK)"), ("de", "German"), ("fr", "French"),
+    ("es", "Spanish"), ("it", "Italian"), ("pt", "Portuguese"), ("br", "Portuguese (Brazil)"),
+    ("ca", "French (Canada)"), ("ch", "Swiss"), ("be", "Belgian"), ("nl", "Dutch"),
+    ("se", "Swedish"), ("no", "Norwegian"), ("dk", "Danish"), ("fi", "Finnish"), ("pl", "Polish"),
+    ("cz", "Czech"), ("hu", "Hungarian"), ("ru", "Russian"), ("ua", "Ukrainian"), ("tr", "Turkish"),
+    ("jp", "Japanese"), ("latam", "Spanish (Latin America)"),
+]
+PAGES = [
+    ("display", "monitor", "Display"), ("power", "battery", "Power"), ("lock", "lock", "Lock screen"),
+    ("keys", "key", "Security keys"),
+    ("wifi", "wifi", "Wi-Fi"), ("network", "lan", "Network"), ("sound", "volume-high", "Sound"),
+    ("wallpaper", "image", "Wallpaper"), ("keyboard", "keyboard", "Keyboard"),
+    ("system", "info", "System"),
+]
+NARROW = 700
 
 
-# ----------------------------------------------------------------- helpers
-def run(*args):
-    try:
-        return subprocess.run(args, capture_output=True, text=True, timeout=20)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return subprocess.CompletedProcess(args, 1, "", str(e))
-
-
-def spawn(*args):
-    try:
-        subprocess.Popen(args, start_new_session=True,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError:
-        pass
-
-
-def read_conf(path):
-    vals = {}
-    try:
-        with open(path) as f:
-            for line in f:
-                m = re.match(r"^\s*([A-Z_][A-Z0-9_]*)=(.*)$", line)
-                if m:
-                    try:
-                        parts = shlex.split(m.group(2))
-                        vals[m.group(1)] = parts[0] if parts else ""
-                    except ValueError:
-                        vals[m.group(1)] = m.group(2)
-    except OSError:
-        pass
-    return vals
-
-
-def write_conf(path, key, value):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    try:
-        with open(path) as f:
-            lines = f.readlines()
-    except OSError:
-        lines = ["# termOS settings (written by termos-settings)\n"]
-    new = f"{key}={shlex.quote(str(value))}\n"
-    for i, line in enumerate(lines):
-        if re.match(rf"^\s*{key}=", line):
-            lines[i] = new
-            break
-    else:
-        lines.append(new)
-    with open(path, "w") as f:
-        f.writelines(lines)
-
-
-def read_outputs():
-    """outputs.conf: '<output> <mode|auto> <scale>' per line."""
-    res = {}
-    try:
-        with open(OUTPUTS_CONF) as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) == 3 and not line.startswith("#"):
-                    res[parts[0]] = (parts[1], parts[2])
-    except OSError:
-        pass
-    return res
-
-
-def save_output(name, mode, scale):
-    outs = read_outputs()
-    outs[name] = (mode, scale)
-    os.makedirs(CFG, exist_ok=True)
-    with open(OUTPUTS_CONF, "w") as f:
-        f.write("# termOS screens: <output> <mode|auto> <scale>  (written by Settings)\n")
-        for n, (m, sc) in sorted(outs.items()):
-            f.write(f"{n} {m} {sc}\n")
-
-
-def fmt_scale(x):
-    return f"{float(x):g}"
-
-
-def root_helper(*args):
-    r = run("sudo", "-n", "/usr/local/bin/termos-root-helper", *args)
-    return r.returncode == 0, (r.stderr or r.stdout).strip()
-
-
-# ----------------------------------------------------------------- widgets
-def label(text, css=None, xalign=0.0, wrap=False):
-    lb = Gtk.Label(label=text, xalign=xalign)
-    lb.set_line_wrap(wrap)
-    if wrap:
-        lb.set_max_width_chars(70)
-    if css:
-        lb.get_style_context().add_class(css)
-    return lb
-
-
-def section(box, title):
-    box.pack_start(label(title.upper(), "section-title"), False, False, 0)
-
-
-def row(box, title, widget, subtitle=None):
-    h = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
-    v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-    v.pack_start(label(title, "row-label"), False, False, 0)
-    if subtitle:
-        v.pack_start(label(subtitle, "row-sub", wrap=True), False, False, 0)
-    h.pack_start(v, True, True, 0)
-    widget.set_valign(Gtk.Align.CENTER)
-    h.pack_end(widget, False, False, 0)
-    box.pack_start(h, False, False, 6)
-    return h
-
-
-def page():
-    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-    box.get_style_context().add_class("page")
-    # keep controls in a readable column on wide screens
-    box.set_halign(Gtk.Align.CENTER)
-    box.set_size_request(720, -1)
-    sw = Gtk.ScrolledWindow()
-    sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-    sw.add(box)
-    return sw, box
-
-
-def slider(lo, hi, value, on_change):
-    s = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, lo, hi, 1)
-    s.set_value(value)
-    s.set_size_request(320, -1)
-    s.set_value_pos(Gtk.PositionType.RIGHT)
-    s.set_digits(0)
-    pending = {"id": 0}
-
-    def fire():
-        pending["id"] = 0
-        on_change(int(s.get_value()))
-        return False
-
-    def changed(_sc):
-        # debounce: apply 150 ms after the finger stops moving
-        if pending["id"]:
-            GLib.source_remove(pending["id"])
-        pending["id"] = GLib.timeout_add(150, fire)
-    s.connect("value-changed", changed)
-    return s
-
-
-# ----------------------------------------------------------------- app
-class Settings(Gtk.Window):
+class Settings(Gtk.ApplicationWindow):
     def __init__(self):
         super().__init__(title="Settings")
-        self.set_default_size(900, 640)
+        self.set_default_size(960, 640)
         self.set_icon_name("preferences-system")
-        prov = Gtk.CssProvider()
-        prov.load_from_data(CSS)
-        Gtk.StyleContext.add_provider_for_screen(
-            Gdk.Screen.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self.narrow = None
+        self.current = None
+        self.nav_labels = []
+        self.rows = {}
 
-        self.stack = Gtk.Stack()
-        self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
-        side = Gtk.StackSidebar()
-        side.set_stack(self.stack)
-        side.set_size_request(200, -1)
-        hb = Gtk.Box()
-        hb.pack_start(side, False, False, 0)
-        hb.pack_start(self.stack, True, True, 0)
-        self.add(hb)
+        self.nav = ui.classes(Gtk.ListBox(), "nav")
+        for key, glyph, title in PAGES:
+            row = Gtk.ListBoxRow()
+            row.key = key
+            line = ui.hbox(14)
+            mark = ui.icon(glyph)
+            mark.set_size_request(28, -1)
+            line.pack_start(mark, False, False, 0)
+            text = ui.label(title)
+            text.set_no_show_all(True)
+            text.show()
+            self.nav_labels.append(text)
+            line.pack_start(text, False, False, 0)
+            row.add(line)
+            row.get_accessible().set_name(title)
+            self.nav.add(row)
+            self.rows[key] = row
+        self.nav.connect("row-selected", self.selected)
+        side = Gtk.ScrolledWindow()
+        side.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        side.add(self.nav)
+        ui.classes(side, "nav")
 
-        self.display_page()
-        self.power_page()
-        self.sound_page()
-        self.wallpaper_page()
-        self.keyboard_page()
-        self.network_page()
-        self.system_page()
+        right = ui.vbox(0)
+        self.heading = ui.label("", "title", ellipsize=True)
+        self.heading.set_margin_start(20)
+        self.heading.set_margin_top(14)
+        right.pack_start(self.heading, False, False, 0)
+        self.holder = ui.vbox(0)
+        right.pack_start(self.holder, True, True, 0)
+        body = ui.hbox(0)
+        body.pack_start(side, False, False, 0)
+        body.pack_start(right, True, True, 0)
+        self.add(body)
+        self.connect("size-allocate", self.resized)
+        self.nav.select_row(self.rows["display"])
 
-    def notify(self, msg):
-        dlg = Gtk.MessageDialog(transient_for=self, modal=True,
-                                message_type=Gtk.MessageType.INFO,
-                                buttons=Gtk.ButtonsType.OK, text=msg)
-        dlg.run()
-        dlg.destroy()
+    def resized(self, _w, alloc):
+        narrow = alloc.width < NARROW
+        if narrow != self.narrow:
+            self.narrow = narrow
+            # not while allocating
+            GLib.idle_add(self.apply_width)
+
+    def apply_width(self):
+        for text in self.nav_labels:
+            text.set_visible(not self.narrow)
+        return False
+
+    def open_arg(self, page, *_rest):
+        if page in self.rows:
+            self.nav.select_row(self.rows[page])
+
+    def selected(self, _list, row):
+        if not row:
+            return
+        self.current = row.key
+        self.rebuild()
+
+    def rebuild(self):
+        # pages are built when shown, so they never show stale values
+        ui.clear(self.holder)
+        self.heading.set_text(next(t for k, _g, t in PAGES if k == self.current))
+        p = ui.Page()
+        getattr(self, f"{self.current}_page")(p)
+        self.holder.pack_start(p.widget, True, True, 0)
+        self.holder.show_all()
+
+    def failed(self, what, err):
+        ui.message(self, f"Couldn't change {what}.", err)
+
+    def setting_switch(self, p, key, default, title, sub, after=None):
+        def changed(on):
+            core.write_conf(key, "1" if on else "0")
+            if after:
+                after()
+        p.row(title, ui.switch(core.setting_on(key, default), changed), sub)
 
     # ---- Display ---------------------------------------------------------
-    def display_page(self):
-        sw, b = page()
-        section(b, "Screen")
-        r = run("brightnessctl", "-c", "backlight", "-m")
-        try:
-            cur = int(r.stdout.strip().split(",")[3].rstrip("%"))
-        except (IndexError, ValueError):
-            cur = None
-        if cur is not None:
-            row(b, "Brightness",
-                slider(5, 100, cur, lambda v: run("brightnessctl", "-c", "backlight", "-q", "set", f"{v}%")))
+    def display_page(self, p):
+        level = core.get_brightness()
+        if level is not None:
+            p.section("Brightness")
+            p.row("Brightness", ui.slider(5, 100, level,
+                                          lambda v: ui.background(lambda: core.set_brightness(v)), 170))
+        self.screens_ui(p)
 
-        self.screens_ui(b)
-
-        dconf = read_conf(DISPLAY_CONF)
+        dconf = core.read_conf(core.DISPLAY_CONF)
         if dconf.get("PANEL"):
-            section(b, "Rotation")
-            auto = Gtk.Switch(active=dconf.get("AUTO", "1") == "1")
-            auto.connect("notify::active",
-                         lambda s, _p: spawn("termos-rotate", "auto" if s.get_active() else "lock"))
-            row(b, "Auto-rotate", auto, "Follow the tablet's orientation sensor")
+            p.section("Rotation")
+            auto = ui.switch(dconf.get("AUTO", "1") == "1",
+                             lambda on: core.spawn("termos-rotate", "auto" if on else "lock"))
+            p.row("Auto-rotate", auto, "Follow the tablet's orientation sensor")
 
-            rot = Gtk.Button(label="Rotate 90°")
-
-            def do_rotate(_b):
+            def rotate():
                 auto.set_active(False)
-                spawn("termos-rotate", "cw")
-            rot.connect("clicked", do_rotate)
-            row(b, "Rotate screen", rot, "Turns auto-rotate off")
+                core.spawn("termos-rotate", "cw")
+            p.row("Rotate screen", ui.button("Rotate 90°", rotate), "Turns auto-rotate off")
 
-            flip = Gtk.Switch(active=dconf.get("SENSOR_OFFSET", "0") == "180")
-
-            def set_flip(s, _p):
-                write_conf(DISPLAY_CONF, "SENSOR_OFFSET", "180" if s.get_active() else "0")
+            def set_flip(on):
+                core.write_conf("SENSOR_OFFSET", "180" if on else "0", core.DISPLAY_CONF)
                 if auto.get_active():
-                    run("termos-rotate", "lock")
-                    spawn("termos-rotate", "auto")
-            flip.connect("notify::active", set_flip)
-            row(b, "Flip auto-rotate", flip, "Turn on if auto-rotate shows the screen upside down")
+                    core.run("termos-rotate", "lock")
+                    core.spawn("termos-rotate", "auto")
+            p.row("Flip auto-rotate", ui.switch(dconf.get("SENSOR_OFFSET", "0") == "180", set_flip),
+                  "Turn on if auto-rotate shows the screen upside down")
 
-        section(b, "Windows")
-        st = read_conf(SETTINGS_CONF)
-        maxi = Gtk.Switch(active=st.get("MAXIMIZE", "1") == "1")
+        p.section("Desktop")
+        self.setting_switch(p, "MAXIMIZE", True, "Open apps full-screen",
+                            "Apps fill the screen and shrink when the on-screen keyboard appears",
+                            lambda: core.spawn("termos-apply-settings", "windows"))
+        self.setting_switch(p, "HOME_SCREEN", True, "Show machines on the home screen",
+                            "The SSH and remote desktop machines you added",
+                            lambda: core.spawn("termos-show", "reload"))
 
-        def set_max(s, _p):
-            write_conf(SETTINGS_CONF, "MAXIMIZE", "1" if s.get_active() else "0")
-            spawn("termos-apply-settings", "windows")
-        maxi.connect("notify::active", set_max)
-        row(b, "Open apps full-screen", maxi,
-            "Apps fill the screen and shrink when the on-screen keyboard appears")
-        self.stack.add_titled(sw, "display", "Display")
-
-    # ---- Screens (every machine) -----------------------------------------
     def confirm_keep(self):
         """Ask to keep a new display setting; revert automatically after 15 s."""
-        dlg = Gtk.MessageDialog(transient_for=self, modal=True,
-                                message_type=Gtk.MessageType.QUESTION,
-                                text="Keep these display settings?")
-        dlg.add_buttons("Revert", Gtk.ResponseType.CANCEL, "Keep", Gtk.ResponseType.OK)
+        dlg, area = ui.dialog(self, "Keep these display settings?")
+        count = ui.label("", "sub")
+        area.pack_start(count, False, False, 0)
+        line = ui.hbox(8)
+        line.set_homogeneous(True)
+        line.add(ui.button("Revert", lambda: dlg.response(Gtk.ResponseType.CANCEL)))
+        line.add(ui.button("Keep", lambda: dlg.response(Gtk.ResponseType.OK), "primary"))
+        area.pack_start(line, False, False, 6)
         left = {"n": 15, "tid": 0}
 
         def tick():
@@ -294,297 +180,324 @@ class Settings(Gtk.Window):
                 left["tid"] = 0
                 dlg.response(Gtk.ResponseType.CANCEL)
                 return False
-            dlg.format_secondary_text(f"Reverting in {left['n']} seconds.")
+            count.set_text(f"Reverting in {left['n']} seconds.")
             return True
-        dlg.format_secondary_text(f"Reverting in {left['n']} seconds.")
+        count.set_text("Reverting in 15 seconds.")
         left["tid"] = GLib.timeout_add(1000, tick)
+        dlg.show_all()
         resp = dlg.run()
         if left["tid"]:
             GLib.source_remove(left["tid"])
         dlg.destroy()
         return resp == Gtk.ResponseType.OK
 
-    def screens_ui(self, b):
-        try:
-            outs = [o for o in json.loads(run("wlr-randr", "--json").stdout)
-                    if o.get("enabled", True)]
-        except (ValueError, TypeError):
-            outs = []
-        for o in outs:
-            name = o.get("name", "?")
-            if re.match(r"(eDP|DSI|LVDS)", name):
+    def screens_ui(self, p):
+        outs = screens.connected()
+        saved = screens.read_saved()
+        for out in outs:
+            name = out.get("name", "?")
+            if screens.is_builtin(out):
                 title = "Built-in screen"
             else:
-                title = " ".join(x for x in (o.get("make"), o.get("model"))
+                title = " ".join(x for x in (out.get("make"), out.get("model"))
                                  if x and x.lower() != "unknown") or "Screen"
-            section(b, f"{title} ({name})")
-            state = {"mode": None, "scale": fmt_scale(o.get("scale", 1)), "busy": False}
-            preferred = None
-
-            # --- resolution
-            modes, seen = [], set()
-            for m in o.get("modes", []):
-                key = (m["width"], m["height"], round(m["refresh"], 2))
-                if key in seen:
-                    continue
-                seen.add(key)
-                ms = f"{m['width']}x{m['height']}@{m['refresh']:.3f}Hz"
-                modes.append((m, ms))
-                if m.get("current"):
-                    state["mode"] = ms
-                if m.get("preferred"):
-                    preferred = ms
-            modes.sort(key=lambda t: (t[0]["width"] * t[0]["height"], t[0]["refresh"]), reverse=True)
-            if modes:
-                mc = Gtk.ComboBoxText()
-                for m, ms in modes:
-                    txt = f"{m['width']} × {m['height']}"
-                    if m["refresh"] >= 1:
-                        txt += f"  ({m['refresh']:.0f} Hz)"
-                    if ms == preferred:
-                        txt += "  · recommended"
-                    mc.append(ms, txt)
-                if state["mode"]:
-                    mc.set_active_id(state["mode"])
-
-                def on_mode(c, name=name, state=state, preferred=preferred):
-                    new = c.get_active_id()
-                    if state["busy"] or not new or new == state["mode"]:
-                        return
-                    run("wlr-randr", "--output", name, "--mode", new)
-                    if self.confirm_keep():
-                        state["mode"] = new
-                        save_output(name, "auto" if new == preferred else new, state["scale"])
-                    else:
-                        if state["mode"]:
-                            run("wlr-randr", "--output", name, "--mode", state["mode"])
-                        state["busy"] = True
-                        c.set_active_id(state["mode"])
-                        state["busy"] = False
-                mc.connect("changed", on_mode)
-                row(b, "Resolution", mc, "Higher shows more; the recommended one is sharpest")
-
-            # --- scale
-            sc = Gtk.ComboBoxText()
-            options = SCALES if state["scale"] in SCALES else SCALES + [state["scale"]]
-            for x in options:
-                sc.append(x, f"{round(float(x) * 100)} %")
-            sc.set_active_id(state["scale"])
-
-            def on_scale(c, name=name, state=state):
-                new = c.get_active_id()
-                if state["busy"] or not new or new == state["scale"]:
-                    return
-                run("wlr-randr", "--output", name, "--scale", new)
-                if self.confirm_keep():
-                    state["scale"] = new
-                    mode = read_outputs().get(name, ("auto", ""))[0]
-                    save_output(name, mode, new)
-                else:
-                    run("wlr-randr", "--output", name, "--scale", state["scale"])
-                    state["busy"] = True
-                    c.set_active_id(state["scale"])
-                    state["busy"] = False
-            sc.connect("changed", on_scale)
-            row(b, "Scale", sc, "Makes text, buttons and windows bigger or smaller")
+            p.section(f"{title} ({name})")
+            self.screen_rows(p, out, name, saved.get(name, ("auto", "auto")))
         if not outs:
-            row(b, "Screens", label("Could not read screen information", "row-sub", xalign=1.0))
+            p.section("Screens")
+            p.note("Couldn't read screen information.")
+
+    def screen_rows(self, p, out, name, saved):
+        now = {"mode": screens.current_mode(out), "scale": float(out.get("scale", 1)), "busy": False}
+
+        modes, seen, preferred = [], set(), None
+        for m in out.get("modes", []):
+            ms = screens.mode_name(m)
+            if ms in seen:
+                continue
+            seen.add(ms)
+            modes.append((m, ms))
+            if m.get("preferred"):
+                preferred = ms
+        modes.sort(key=lambda t: (t[0]["width"] * t[0]["height"], t[0]["refresh"]), reverse=True)
+        if modes:
+            options = []
+            for m, ms in modes:
+                text = f"{m['width']} × {m['height']}"
+                if m["refresh"] >= 1:
+                    text += f", {m['refresh']:.0f} Hz"
+                options.append((ms, text + (" ★" if ms == preferred else "")))
+
+            def on_mode(new):
+                if now["busy"] or not new or new == now["mode"]:
+                    return
+                r = core.run("wlr-randr", "--output", name, "--mode", new)
+                if r.returncode == 0 and self.confirm_keep():
+                    now["mode"] = new
+                    screens.save(name, mode="auto" if new == preferred else new)
+                    return
+                if r.returncode:
+                    self.failed("the resolution", r.stderr.strip())
+                elif now["mode"]:
+                    core.run("wlr-randr", "--output", name, "--mode", now["mode"])
+                now["busy"] = True
+                mode_combo.set_active_id(now["mode"])
+                now["busy"] = False
+            mode_combo = ui.combo(options, now["mode"], on_mode)
+            p.row("Resolution", mode_combo, "★ is the screen's own, sharpest resolution")
+
+        auto = screens.auto_scale(out)
+        options = [("auto", f"Automatic ({round(auto * 100)} %)")]
+        options += [(s, f"{round(float(s) * 100)} %") for s in screens.SCALES]
+        chosen = saved[1]
+        if chosen not in dict(options):
+            options.append((chosen, chosen))
+        state = {"choice": chosen}
+
+        def on_scale(new):
+            if now["busy"] or not new or new == state["choice"]:
+                return
+            value = auto if new == "auto" else float(new)
+            same = abs(value - now["scale"]) < 0.01
+            r = core.run("wlr-randr", "--output", name, "--scale", f"{value:g}")
+            if r.returncode == 0 and (same or self.confirm_keep()):
+                now["scale"], state["choice"] = value, new
+                screens.save(name, scale=new)
+                return
+            if r.returncode:
+                self.failed("the scale", r.stderr.strip())
+            else:
+                core.run("wlr-randr", "--output", name, "--scale", f"{now['scale']:g}")
+            now["busy"] = True
+            scale_combo.set_active_id(state["choice"])
+            now["busy"] = False
+        scale_combo = ui.combo(options, chosen, on_scale)
+        p.row("Scale", scale_combo, "Makes text, buttons and windows bigger or smaller")
 
     # ---- Power -----------------------------------------------------------
-    def power_page(self):
-        sw, b = page()
-        pconf = read_conf("/etc/termos/power.conf")
-        profile = pconf.get("PROFILE", "balanced")
-        active = pconf.get("ACTIVE", profile)
-
-        bat = None
-        for d in sorted(glob.glob("/sys/class/power_supply/*")):
-            try:
-                with open(os.path.join(d, "type")) as f:
-                    if f.read().strip() == "Battery":
-                        bat = d
-                        break
-            except OSError:
-                pass
-
-        def sysread(name, default=""):
-            try:
-                with open(os.path.join(bat, name)) as f:
-                    return f.read().strip()
-            except (OSError, TypeError):
-                return default
-
+    def power_page(self, p):
+        bat = core.battery()
         if bat:
-            section(b, "Battery")
-            text = f"{sysread('capacity', '?')} %  ·  {sysread('status', '?')}"
-            row(b, "Charge", label(text, "row-label", xalign=1.0))
-            full = sysread("energy_full") or sysread("charge_full")
-            design = sysread("energy_full_design") or sysread("charge_full_design")
-            if full and design and int(design) > 0:
-                row(b, "Battery health", label(f"{int(full) * 100 // int(design)} % of original capacity",
-                                               "row-label", xalign=1.0))
+            p.section("Battery")
+            p.row("Charge", ui.label(f"{bat['percent']} %  ·  {bat['status']}", "row-label"))
+            if bat["health"] is not None:
+                p.row("Battery health", ui.label(f"{bat['health']} %", "row-label"),
+                      "How much of the original capacity is left")
 
-        section(b, "Power mode")
-        modes = [("power-saver", "Battery saver",
-                  "Longest battery life. CPU stays at base speed (no turbo), lower graphics "
-                  "clock, maximum Wi-Fi and PCIe power saving. Apps feel slower."),
-                 ("balanced", "Balanced (recommended)",
-                  "Full speed in short bursts when needed, power saving the rest of the time."),
-                 ("performance", "Performance",
-                  "Always full speed, power saving off. Uses the battery fastest and runs warmer.")]
-        group = None
-        self.mode_buttons = {}
+        pconf = core.read_conf(core.POWER_CONF)
+        profile = pconf.get("PROFILE", "balanced")
+        p.section("Power mode")
+        state = {"profile": profile, "busy": False}
+        radios = {}
 
         def set_mode(btn, key):
-            if not btn.get_active():
+            if state["busy"] or not btn.get_active() or key == state["profile"]:
                 return
-            ok, err = root_helper("power", "set", key)
-            if not ok:
-                self.notify(f"Could not change power mode:\n{err}")
-        for key, title, desc in modes:
-            rb = Gtk.RadioButton.new_with_label_from_widget(group, title)
+            ok, err = core.root_helper("power", "set", key)
+            if ok:
+                state["profile"] = key
+                return
+            state["busy"] = True
+            radios[state["profile"]].set_active(True)
+            state["busy"] = False
+            self.failed("the power mode", err)
+        group = None
+        for key, title, desc in (
+            ("power-saver", "Battery saver",
+             "Longest battery life. No turbo, lower graphics clock, maximum Wi-Fi and PCIe power "
+             "saving. Apps feel slower."),
+            ("balanced", "Balanced (recommended)",
+             "Full speed in short bursts when needed, power saving the rest of the time."),
+            ("performance", "Performance",
+             "Always full speed, power saving off. Uses the battery fastest and runs warmer."),
+        ):
+            rb = Gtk.RadioButton.new_from_widget(group)
             group = group or rb
-            rb.get_child().get_style_context().add_class("row-label")
+            words = ui.vbox(2)
+            words.set_margin_start(8)
+            words.pack_start(ui.label(title, "row-label", wrap=True), False, False, 0)
+            words.pack_start(ui.label(desc, "sub", wrap=True), False, False, 0)
+            rb.add(words)
+            rb.get_accessible().set_name(title)
             rb.set_active(key == profile)
+            radios[key] = rb
+            p.add(rb)
+        for key, rb in radios.items():
             rb.connect("toggled", set_mode, key)
-            self.mode_buttons[key] = rb
-            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            box.pack_start(rb, False, False, 0)
-            d = label(desc, "row-sub", wrap=True)
-            d.set_margin_start(30)
-            box.pack_start(d, False, False, 0)
-            b.pack_start(box, False, False, 6)
-        if active != profile:
-            b.pack_start(label("Battery saver is on right now because the battery is low.",
-                               "row-sub", wrap=True), False, False, 0)
+        if pconf.get("ACTIVE", profile) != profile:
+            p.note("Battery saver is on right now because the battery is low.", "sub", "warn")
 
-        st = read_conf(SETTINGS_CONF)
+        st = core.read_conf()
         if bat:
-            auto = Gtk.Switch(active=st.get("AUTO_SAVER", "1") == "1")
-            auto.connect("notify::active", lambda s, _p: write_conf(
-                SETTINGS_CONF, "AUTO_SAVER", "1" if s.get_active() else "0"))
-            level = Gtk.ComboBoxText()
-            for pct in ("10", "15", "20", "30", "50"):
-                level.append(pct, f"{pct} %")
-            level.set_active_id(st.get("SAVER_AT", "20") if st.get("SAVER_AT", "20") in
-                                ("10", "15", "20", "30", "50") else "20")
-            level.connect("changed", lambda c: write_conf(SETTINGS_CONF, "SAVER_AT", c.get_active_id()))
-            h = Gtk.Box(spacing=8)
-            h.pack_start(level, False, False, 0)
-            h.pack_start(auto, False, False, 0)
-            row(b, "Automatic battery saver", h,
-                "Switch to Battery saver below this level; back when plugged in")
+            p.section("Automatic battery saver")
+            self.setting_switch(p, "AUTO_SAVER", True, "Switch on when the battery is low",
+                                "Switches back when plugged in")
+            levels = [(x, f"{x} %") for x in ("10", "15", "20", "30", "50")]
+            at = st.get("SAVER_AT", "20")
+            p.row("Switch on below", ui.combo(levels, at if at in dict(levels) else "20",
+                                              lambda v: core.write_conf("SAVER_AT", v)))
 
-        section(b, "When not in use")
+        p.section("When not in use")
 
-        def idle_combo(key, default, choices):
-            c = Gtk.ComboBoxText()
-            for secs, text in choices:
-                c.append(str(secs), text)
-            cur = st.get(key, str(default))
-            c.set_active_id(cur if cur in [str(x) for x, _t in choices] else str(default))
+        def idle_row(title, key, default, choices, sub=None):
+            ids = [str(secs) for secs, _t in choices]
+            now = st.get(key, str(default))
 
-            def changed(cb):
-                write_conf(SETTINGS_CONF, key, cb.get_active_id())
-                spawn("termos-idle", "restart")
-            c.connect("changed", changed)
-            return c
+            def changed(value):
+                core.write_conf(key, value)
+                core.spawn("termos-idle", "restart")
+            p.row(title, ui.combo(choices, now if now in ids else default, changed), sub)
         never = (0, "Never")
         mins = lambda *m: [(x * 60, f"{x} min") for x in m]  # noqa: E731
-        row(b, "Dim screen after", idle_combo("IDLE_DIM", 120, [never, (30, "30 s")] + mins(1, 2, 5, 10)))
-        row(b, "Turn screen off after", idle_combo("IDLE_OFF", 300, [never] + mins(1, 2, 5, 10, 30)))
+        idle_row("Dim screen after", "IDLE_DIM", 120, [never, (30, "30 s")] + mins(1, 2, 5, 10))
+        idle_row("Turn screen off after", "IDLE_OFF", 300, [never] + mins(1, 2, 5, 10, 30))
         if bat:
-            row(b, "Sleep on battery after", idle_combo("IDLE_SLEEP_BAT", 900, [never] + mins(5, 10, 15, 30, 60)),
-                "SSH sessions drop during sleep; mosh sessions reconnect")
-        row(b, "Sleep when plugged in after",
-            idle_combo("IDLE_SLEEP_AC", 0, [never] + mins(15, 30, 60, 120)))
-        b.pack_start(label("Video playback and the ☕ panel button keep the screen awake.",
-                           "row-sub", wrap=True), False, False, 4)
+            idle_row("Sleep on battery after", "IDLE_SLEEP_BAT", 900, [never] + mins(5, 10, 15, 30, 60),
+                     "SSH reconnects after sleep; mosh and tmux keep the session")
+        idle_row("Sleep when plugged in after", "IDLE_SLEEP_AC", 0, [never] + mins(15, 30, 60, 120))
+        p.note("Video playback and Keep awake in Quick Settings keep the screen on.")
 
-        section(b, "Power button")
-        pk = Gtk.ComboBoxText()
-        for k, v in (("suspend", "Sleep"), ("poweroff", "Shut down"), ("ignore", "Do nothing")):
-            pk.append(k, v)
-        cur = "suspend"
-        try:
-            with open("/etc/systemd/logind.conf.d/termos.conf") as f:
-                m = re.search(r"^HandlePowerKey=(\w+)", f.read(), re.M)
-                cur = m.group(1) if m else cur
-        except OSError:
-            pass
-        pk.set_active_id(cur)
+        p.section("Power button")
+        key_now = "suspend"
+        m = re.search(r"^HandlePowerKey=(\w+)", core.slurp("/etc/systemd/logind.conf.d/termos.conf"), re.M)
+        if m:
+            key_now = m.group(1)
+        pk = {"value": key_now, "busy": False}
 
-        def set_pk(c):
-            ok, err = root_helper("powerkey", c.get_active_id())
+        def set_pk(value):
+            if pk["busy"] or value == pk["value"]:
+                return
+            ok, err = core.root_helper("powerkey", value)
+            if ok:
+                pk["value"] = value
+                return
+            pk["busy"] = True
+            pk_combo.set_active_id(pk["value"])
+            pk["busy"] = False
+            self.failed("the power button", err)
+        pk_combo = ui.combo([("suspend", "Sleep"), ("poweroff", "Shut down"), ("ignore", "Do nothing")],
+                            key_now, set_pk)
+        p.row("Short press", pk_combo, "Holding the button always shuts down")
+
+    # ---- Lock screen -----------------------------------------------------
+    def lock_page(self, p):
+        p.section("When to lock")
+        p.row("At start-up and after sleep", ui.label("Always", "row-label"),
+              "Your PIN is needed before the desktop appears")
+        self.setting_switch(p, "LOCK_SCREEN_OFF", True, "When the screen turns off",
+                            "Also lock when the screen goes dark after inactivity")
+        p.row("Lock now", ui.button("Lock", lambda: core.spawn("termos-lock-now"), icon_name="lock"),
+              "Or press Super+L")
+        p.section("Change PIN")
+        p.add(widgets.PinChanger())
+        p.note("After 5 wrong PINs each try has to wait longer. After 10, only your account "
+               "password unlocks the device.")
+        p.note("The disk is not encrypted: the PIN stops someone using the device, but not "
+               "someone who takes the storage out or boots it from USB.")
+
+    # ---- Security keys ---------------------------------------------------
+    def keys_page(self, p):
+        keyspage.KeysPage(self, p)
+
+    # ---- Wi-Fi -----------------------------------------------------------
+    def wifi_page(self, p):
+        p.section()
+        p.add(widgets.WifiList())
+        p.section("More")
+        p.row("Hidden and company networks", ui.button("Open", lambda: core.spawn("nm-connection-editor")),
+              "The full network connection editor")
+
+    # ---- Network ---------------------------------------------------------
+    def network_page(self, p):
+        p.section("This device")
+        net = netinfo.status()
+        p.row("Connection", ui.label(net["name"] or "Not connected", "row-label", wrap=True))
+        for line in core.run("ip", "-4", "-br", "addr").stdout.splitlines():
+            parts = line.split()
+            if len(parts) > 2 and parts[0] != "lo":
+                p.row(f"IP address ({parts[0].split('@')[0]})",
+                      ui.label(parts[2].split("/")[0], "row-label"))
+
+        p.section("Remote access to this device")
+        enabled = core.run("systemctl", "is-enabled", "sshd.service").stdout.strip() == "enabled"
+
+        def set_ssh(on):
+            ok, err = core.root_helper("ssh", "on" if on else "off")
             if not ok:
-                self.notify(f"Could not change power button:\n{err}")
-        pk.connect("changed", set_pk)
-        row(b, "Short press", pk, "Holding the button always shuts down")
-        self.stack.add_titled(sw, "power", "Power")
+                self.failed("the SSH server", err)
+            return ok
+        p.row("SSH server", ui.switch(enabled, set_ssh),
+              f"Log in to this device with: ssh {os.environ.get('USER', 'user')}@<IP address>")
+
+        p.section("Bluetooth")
+        bt_on = bluetooth.state()
+        if bt_on is not None:
+            p.row("Bluetooth", ui.switch(bt_on, bluetooth.turn),
+                  "Turn off to save battery. Phone passkeys and wireless devices need it on")
+            p.row("Bluetooth devices", ui.button("Devices…", lambda: core.spawn("termos-bluetooth")),
+                  "Pair keyboards, mice and headphones")
+        else:
+            p.note("No Bluetooth adapter found.")
+
+        p.section("Private network")
+        p.add(widgets.TailscaleControls())
 
     # ---- Sound -----------------------------------------------------------
-    def sound_page(self):
-        sw, b = page()
-        section(b, "Output")
-        r = run("pactl", "get-sink-volume", "@DEFAULT_SINK@")
-        m = re.search(r"(\d+)%", r.stdout)
-        vol = int(m.group(1)) if m else 50
-        row(b, "Volume", slider(0, 100, min(vol, 100),
-                                lambda v: run("pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{v}%")))
-        muted = "yes" in run("pactl", "get-sink-mute", "@DEFAULT_SINK@").stdout
-        mute = Gtk.Switch(active=muted)
-        mute.connect("notify::active", lambda s, _p: run(
-            "pactl", "set-sink-mute", "@DEFAULT_SINK@", "1" if s.get_active() else "0"))
-        row(b, "Mute", mute)
-        self.stack.add_titled(sw, "sound", "Sound")
+    def sound_page(self, p):
+        p.section("Output")
+        vol = core.get_volume()
+        if not vol:
+            p.note("No sound output found.")
+            return
+        p.row("Volume", ui.slider(0, 100, min(vol[0], 100),
+                                  lambda v: ui.background(lambda: core.set_volume(v)), 170))
+        p.row("Mute", ui.switch(vol[1], lambda on: core.set_muted(on)))
 
     # ---- Wallpaper -------------------------------------------------------
-    def wallpaper_page(self):
-        sw, b = page()
-        st = read_conf(SETTINGS_CONF)
-        current = "" if st.get("WALLPAPER_COLOR") else st.get("WALLPAPER", DEFAULT_WALLPAPER)
-        section(b, "Pictures")
-        b.pack_start(label("Put your own images in ~/Pictures/Wallpapers to list them here.",
-                           "row-sub"), False, False, 0)
-        flow = Gtk.FlowBox()
-        flow.set_selection_mode(Gtk.SelectionMode.NONE)
-        flow.set_max_children_per_line(4)
-        flow.set_row_spacing(12)
-        flow.set_column_spacing(12)
-        self.thumbs = []
+    def wallpaper_page(self, p):
+        st = core.read_conf()
+        current = "" if st.get("WALLPAPER_COLOR") else st.get("WALLPAPER") or DEFAULT_WALLPAPER
+        p.section("Pictures")
+        flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, column_spacing=10, row_spacing=10)
+        flow.set_max_children_per_line(3)
+        thumbs = []
+
+        def mark(path):
+            for item, btn in thumbs:
+                ui.set_class(btn, "primary", item == path)
 
         def choose(path):
-            write_conf(SETTINGS_CONF, "WALLPAPER", path)
-            write_conf(SETTINGS_CONF, "WALLPAPER_COLOR", "")
-            spawn("termos-apply-settings", "wallpaper")
-            for p, btn in self.thumbs:
-                ctx = btn.get_style_context()
-                (ctx.add_class if p == path else ctx.remove_class)("thumb-selected")
+            core.write_conf("WALLPAPER", path)
+            core.write_conf("WALLPAPER_COLOR", "")
+            core.spawn("termos-apply-settings", "wallpaper")
+            mark(path)
 
         files = []
-        for d in WALLPAPER_DIRS:
+        for folder in WALLPAPER_DIRS:
             for ext in ("png", "jpg", "jpeg", "webp"):
-                files += sorted(glob.glob(os.path.join(d, f"*.{ext}")))
+                files += sorted(glob.glob(os.path.join(folder, f"*.{ext}")))
         for path in files:
             try:
-                pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, 240, 150, True)
-                img = Gtk.Image.new_from_pixbuf(pb)
-            except Exception:
+                img = Gtk.Image.new_from_pixbuf(GdkPixbuf.Pixbuf.new_from_file_at_scale(path, 176, 110, True))
+            except GLib.Error:
                 img = Gtk.Image.new_from_icon_name("image-x-generic", Gtk.IconSize.DIALOG)
             btn = Gtk.Button()
-            btn.add(img)
-            btn.set_relief(Gtk.ReliefStyle.NONE)
-            btn.get_style_context().add_class("thumb")
-            if path == current:
-                btn.get_style_context().add_class("thumb-selected")
-            btn.connect("clicked", lambda _b, p=path: choose(p))
-            self.thumbs.append((path, btn))
+            box = ui.vbox(4)
+            box.set_border_width(5)
+            box.pack_start(img, False, False, 0)
+            title = os.path.splitext(os.path.basename(path))[0].replace("-", " ").capitalize()
+            name = ui.label(title, xalign=0.5, ellipsize=True)
+            name.set_max_width_chars(14)
+            box.pack_start(name, False, False, 0)
+            btn.add(box)
+            btn.connect("clicked", lambda _b, item=path: choose(item))
+            thumbs.append((path, btn))
             flow.add(btn)
-        b.pack_start(flow, False, False, 6)
+        mark(current)
+        p.add(flow)
+        p.note("Put your own images in ~/Pictures/Wallpapers to list them here.")
 
-        pick = Gtk.Button(label="Choose image…")
-
-        def pick_file(_b):
+        def pick_file():
             dlg = Gtk.FileChooserDialog(title="Choose wallpaper", transient_for=self,
                                         action=Gtk.FileChooserAction.OPEN)
             dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Use", Gtk.ResponseType.OK)
@@ -592,238 +505,112 @@ class Settings(Gtk.Window):
             flt.set_name("Images")
             flt.add_mime_type("image/*")
             dlg.add_filter(flt)
-            if dlg.run() == Gtk.ResponseType.OK:
+            if dlg.run() == Gtk.ResponseType.OK and dlg.get_filename():
                 choose(dlg.get_filename())
             dlg.destroy()
-        pick.connect("clicked", pick_file)
-        row(b, "Other image", pick)
+        p.row("Other image", ui.button("Choose…", pick_file))
 
-        section(b, "Solid colour")
+        p.section("Solid colour")
         rgba = Gdk.RGBA()
-        rgba.parse(st.get("WALLPAPER_COLOR") or "#1e1e2e")
+        rgba.parse(st.get("WALLPAPER_COLOR") or ui.COLORS["base"])
         cb = Gtk.ColorButton.new_with_rgba(rgba)
 
         def set_color(c):
             col = c.get_rgba()
-            hexcol = "#%02x%02x%02x" % (int(col.red * 255), int(col.green * 255), int(col.blue * 255))
-            write_conf(SETTINGS_CONF, "WALLPAPER_COLOR", hexcol)
-            spawn("termos-apply-settings", "wallpaper")
-            for _p, btn in self.thumbs:
-                btn.get_style_context().remove_class("thumb-selected")
+            core.write_conf("WALLPAPER_COLOR", "#%02x%02x%02x" % tuple(
+                round(x * 255) for x in (col.red, col.green, col.blue)))
+            core.spawn("termos-apply-settings", "wallpaper")
+            mark(None)
         cb.connect("color-set", set_color)
-        row(b, "Use a plain colour", cb)
-        self.stack.add_titled(sw, "wallpaper", "Wallpaper")
+        p.row("Use a plain colour", cb)
 
     # ---- Keyboard --------------------------------------------------------
-    def keyboard_page(self):
-        sw, b = page()
-        section(b, "Hardware keyboard")
-        st = read_conf(SETTINGS_CONF)
+    def keyboard_page(self, p):
+        p.section("Hardware keyboard")
+        st = core.read_conf()
         cur = st.get("KEYBOARD_LAYOUT") or os.environ.get("XKB_DEFAULT_LAYOUT", "us")
-        combo = Gtk.ComboBoxText.new_with_entry()
-        for lay in LAYOUTS:
-            combo.append(lay, lay)
-        combo.get_child().set_text(cur)
-        combo.get_child().set_width_chars(8)
-        apply_btn = Gtk.Button(label="Apply")
+        options = list(LAYOUTS)
+        if cur not in dict(options):
+            options.append((cur, cur))
 
-        def apply_layout(_b):
-            lay = combo.get_child().get_text().strip()
-            if not re.fullmatch(r"[a-z]{2,8}(\([a-z0-9_-]+\))?", lay):
-                self.notify("That doesn't look like a keyboard layout code (e.g. us, de, gb).")
-                return
-            write_conf(SETTINGS_CONF, "KEYBOARD_LAYOUT", lay)
-            spawn("termos-apply-settings", "keyboard")
-        apply_btn.connect("clicked", apply_layout)
-        h = Gtk.Box(spacing=8)
-        h.pack_start(combo, False, False, 0)
-        h.pack_start(apply_btn, False, False, 0)
-        row(b, "Layout", h, "Two-letter layout code, e.g. us, gb, de, fr")
+        def apply_layout(value):
+            core.write_conf("KEYBOARD_LAYOUT", value)
+            core.spawn("termos-apply-settings", "keyboard")
+        p.row("Layout", ui.combo(options, cur, apply_layout))
 
-        section(b, "Touchpad")
-        sc = Gtk.ComboBoxText()
-        sc.append("0", "Normal (content follows the scrollbar)")
-        sc.append("1", "Inverted (content follows your fingers)")
-        sc.set_active_id("1" if st.get("NATURAL_SCROLL") == "1" else "0")
+        other = Gtk.Entry(placeholder_text="e.g. at")
+        other.set_width_chars(8)
 
-        def set_scroll(c):
-            write_conf(SETTINGS_CONF, "NATURAL_SCROLL", c.get_active_id())
-            spawn("termos-apply-settings", "touchpad")
-        sc.connect("changed", set_scroll)
-        row(b, "Two-finger scroll direction", sc, "Applies to the touchpad on a keyboard cover or mouse pad")
+        def apply_other():
+            value = other.get_text().strip()
+            if re.fullmatch(r"[a-z]{2,8}(\([a-z0-9_-]+\))?", value):
+                apply_layout(value)
+                GLib.idle_add(lambda: (self.rebuild(), False)[1])
+            else:
+                ui.message(self, "That isn't a layout code.", "Examples: at, is, us(intl)")
+        line = ui.hbox(8)
+        line.pack_start(other, False, False, 0)
+        line.pack_start(ui.button("Use", apply_other), False, False, 0)
+        p.row("Another layout", line, "By its layout code")
 
-        section(b, "On-screen keyboard")
-        show = Gtk.Button(label="Show / hide")
-        show.connect("clicked", lambda _b: spawn("termos-osk", "toggle"))
-        row(b, "On-screen keyboard", show,
-            "Also on the ⌨ panel button. Open apps shrink to stay visible above it.")
-        self.stack.add_titled(sw, "keyboard", "Keyboard & Touchpad")
+        p.section("Touchpad")
 
-    # ---- Network ---------------------------------------------------------
-    def network_page(self):
-        sw, b = page()
-        section(b, "Connections")
-        nm = Gtk.Button(label="Open")
-        nm.connect("clicked", lambda _b: spawn("nm-connection-editor"))
-        row(b, "Wi-Fi & network connections", nm,
-            "Or use the network icon in the panel to join Wi-Fi")
+        def set_scroll(on):
+            core.write_conf("NATURAL_SCROLL", "1" if on else "0")
+            core.spawn("termos-apply-settings", "touchpad")
+        p.row("Content follows your fingers", ui.switch(st.get("NATURAL_SCROLL") == "1", set_scroll),
+              "Two-finger scrolling works like on a phone")
 
-        addrs = run("ip", "-4", "-br", "addr").stdout.splitlines()
-        addrs = [a.split() for a in addrs if a and not a.startswith("lo ")]
-        text = "\n".join(f"{a[0].split('@')[0]}: {a[2].split('/')[0]}" for a in addrs if len(a) > 2) or "not connected"
-        row(b, "This device's IP address", label(text, "row-label", xalign=1.0))
-
-        section(b, "Remote access to this device")
-        enabled = run("systemctl", "is-enabled", "sshd.service").stdout.strip() == "enabled"
-        ssh = Gtk.Switch(active=enabled)
-        busy = {"v": False}
-
-        def set_ssh(s, _p):
-            if busy["v"]:
-                return
-            ok, err = root_helper("ssh", "on" if s.get_active() else "off")
-            if not ok:
-                busy["v"] = True
-                s.set_active(not s.get_active())
-                busy["v"] = False
-                self.notify(f"Could not change SSH server:\n{err}")
-        ssh.connect("notify::active", set_ssh)
-        row(b, "SSH server", ssh,
-            f"Allow logging in to this device with: ssh {os.environ.get('USER', 'user')}@<IP address>")
-        section(b, "Bluetooth")
-        rf = run("rfkill", "list", "bluetooth").stdout
-        if "Bluetooth" in rf or "hci" in rf:
-            bt = Gtk.Switch(active="Soft blocked: yes" not in rf)
-            bt.connect("notify::active", lambda s, _p: run(
-                "rfkill", "unblock" if s.get_active() else "block", "bluetooth"))
-            row(b, "Bluetooth", bt, "Turn off to save battery when not using Bluetooth devices")
-            btb = Gtk.Button(label="Devices…")
-            btb.connect("clicked", lambda _b: spawn("termos-bluetooth"))
-            row(b, "Bluetooth devices", btb, "Pair keyboards, mice and headphones")
-        else:
-            row(b, "Bluetooth", label("No Bluetooth adapter found", "row-sub", xalign=1.0))
-
-        section(b, "Tailscale (private network)")
-        ts_on = run("systemctl", "is-enabled", "tailscaled.service").stdout.strip() == "enabled"
-        ts_info = label("", "row-sub", xalign=1.0)
-
-        def ts_refresh():
-            if not ts_sw.get_active():
-                ts_info.set_text("off")
-                return
-            r = run("tailscale", "status", "--json")
-            try:
-                import json
-                j = json.loads(r.stdout)
-                state = j.get("BackendState", "?")
-                ips = ", ".join(j.get("Self", {}).get("TailscaleIPs", [])[:1])
-                ts_info.set_text(f"{state}{'  ·  ' + ips if ips else ''}")
-            except (ValueError, AttributeError):
-                ts_info.set_text("starting…")
-        ts_sw = Gtk.Switch(active=ts_on)
-        busy_ts = {"v": False}
-
-        def set_ts(s, _p):
-            if busy_ts["v"]:
-                return
-            ok, err = root_helper("tailscale", "on" if s.get_active() else "off")
-            if not ok:
-                busy_ts["v"] = True
-                s.set_active(not s.get_active())
-                busy_ts["v"] = False
-                self.notify(f"Could not change Tailscale:\n{err}")
-            ts_refresh()
-        ts_sw.connect("notify::active", set_ts)
-        row(b, "Tailscale", ts_sw, "Reach your machines from any network without opening ports")
-        login = Gtk.Button(label="Sign in…")
-        login.connect("clicked", lambda _b: spawn("foot", "-T", "Tailscale sign-in", "-e",
-                                                  "termos-tailscale-login"))
-        row(b, "Account", login, "Opens the Tailscale sign-in page in the browser")
-        row(b, "Status", ts_info)
-        ts_refresh()
-        self.stack.add_titled(sw, "network", "Network")
+        p.section("On-screen keyboard")
+        p.row("On-screen keyboard", ui.button("Show / hide", lambda: core.spawn("termos-osk", "toggle")),
+              "Also on the panel. Open apps shrink to stay visible above it.")
 
     # ---- System ----------------------------------------------------------
-    def system_page(self):
-        sw, b = page()
-        section(b, "Device")
-        host = Gtk.Entry(text=socket.gethostname())
-        host.set_width_chars(22)
-        hbtn = Gtk.Button(label="Apply")
+    def system_page(self, p):
+        p.section("Device name")
+        host = Gtk.Entry(text=core.hostname())
+        host.set_width_chars(8)
 
-        def set_host(_b):
-            ok, err = root_helper("hostname", host.get_text().strip())
-            self.notify("Hostname changed." if ok else f"Could not change hostname:\n{err}")
-        hbtn.connect("clicked", set_host)
-        h = Gtk.Box(spacing=8)
-        h.pack_start(host, False, False, 0)
-        h.pack_start(hbtn, False, False, 0)
-        row(b, "Hostname", h)
+        def set_host():
+            ok, err = core.root_helper("hostname", host.get_text().strip())
+            if ok:
+                ui.message(self, "Device name changed.")
+            else:
+                self.failed("the device name", err)
+        line = ui.hbox(8)
+        line.pack_start(host, True, True, 0)
+        line.pack_start(ui.button("Apply", set_host), False, False, 0)
+        p.add(line)
 
-        tzs = run("timedatectl", "list-timezones").stdout.split()
-        curtz = run("timedatectl", "show", "-p", "Timezone", "--value").stdout.strip()
-        tz = Gtk.ComboBoxText.new_with_entry()
-        for z in tzs:
-            tz.append(z, z)
-        tz.get_child().set_text(curtz)
-        tz.get_child().set_width_chars(22)
-        compl = Gtk.EntryCompletion()
-        store = Gtk.ListStore(str)
-        for z in tzs:
-            store.append([z])
-        compl.set_model(store)
-        compl.set_text_column(0)
-        compl.set_match_func(lambda _c, key, it: key.lower() in store[it][0].lower())
-        tz.get_child().set_completion(compl)
-        tzbtn = Gtk.Button(label="Apply")
+        p.section("Date and time")
+        p.add(widgets.TimezonePicker())
 
-        def set_tz(_b):
-            ok, err = root_helper("timezone", tz.get_child().get_text().strip())
-            self.notify("Timezone changed." if ok else f"Could not change timezone:\n{err}")
-        tzbtn.connect("clicked", set_tz)
-        h = Gtk.Box(spacing=8)
-        h.pack_start(tz, False, False, 0)
-        h.pack_start(tzbtn, False, False, 0)
-        row(b, "Timezone", h, "Type part of a city name, e.g. Toronto")
+        p.section("Software")
+        p.row("Update termOS and all apps",
+              ui.button("Update…", lambda: core.spawn("termos-updater"), "primary"), "Needs internet")
+        if not glob.glob("/usr/share/fonts/noto-cjk/*"):
+            p.row("Chinese, Japanese and Korean fonts",
+                  ui.button("Install", lambda: core.spawn(
+                      "foot", "-T", "Install fonts", "-e", "bash", "-c",
+                      "sudo pacman -Syu --needed noto-fonts-cjk; echo; read -rp 'Press Enter to close'")),
+                  "Optional, about 300 MB. Also updates the system.")
+        p.row("Welcome guide", ui.button("Open", lambda: core.spawn("termos-welcome")))
 
-        section(b, "Software")
-        upd = Gtk.Button(label="Update now")
-        upd.connect("clicked", lambda _b: spawn("foot", "-T", "termOS update", "-e", "termos-update"))
-        row(b, "Update termOS and all apps", upd, "Opens a terminal; needs internet")
-
-        section(b, "About")
-        info = []
-        try:
-            with open("/etc/termos/version") as f:
-                info.append(("termOS", f.read().strip()))
-        except OSError:
-            pass
+        p.section("About")
+        version = core.slurp("/etc/termos/version")
+        info = [("termOS", version)] if version else []
         info.append(("Kernel", os.uname().release))
-        try:
-            with open("/proc/cpuinfo") as f:
-                cpu = re.search(r"model name\s*:\s*(.*)", f.read())
-                info.append(("Processor", re.sub(r"\s+", " ", cpu.group(1)) if cpu else "?"))
-            with open("/proc/meminfo") as f:
-                kb = int(re.search(r"MemTotal:\s*(\d+)", f.read()).group(1))
-                info.append(("Memory", f"{kb / 1024 / 1024:.1f} GB"))
-        except (OSError, AttributeError):
-            pass
+        cpu = re.search(r"model name\s*:\s*(.*)", core.slurp("/proc/cpuinfo"))
+        if cpu:
+            info.append(("Processor", re.sub(r"\s+", " ", cpu.group(1))))
+        mem = re.search(r"MemTotal:\s*(\d+)", core.slurp("/proc/meminfo"))
+        if mem:
+            info.append(("Memory", f"{int(mem.group(1)) / 1024 / 1024:.1f} GB"))
         du = shutil.disk_usage("/")
         info.append(("Storage", f"{du.free / 1e9:.1f} GB free of {du.total / 1e9:.1f} GB"))
-        for k, v in info:
-            row(b, k, label(v, "row-label", xalign=1.0))
-        self.stack.add_titled(sw, "system", "System")
-
-
-def main():
-    import sys
-    win = Settings()
-    win.connect("destroy", Gtk.main_quit)
-    win.show_all()
-    if len(sys.argv) > 1 and win.stack.get_child_by_name(sys.argv[1]):
-        win.stack.set_visible_child_name(sys.argv[1])
-    Gtk.main()
+        for key, value in info:
+            p.row(key, ui.label(value, "sub", wrap=True, xalign=1.0))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(ui.main("Settings", Settings, "termos-settings"))

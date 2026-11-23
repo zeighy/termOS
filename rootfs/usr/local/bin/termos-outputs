@@ -1,32 +1,45 @@
-#!/bin/bash
-# termOS: saved resolution + scale for every screen (built-in or external).
-#   termos-outputs apply      apply ~/.config/termos/outputs.conf to connected screens
-# outputs.conf lines:  <output> <mode|auto> <scale>
-#   e.g.  HDMI-A-1 1920x1080@60.000Hz 1.25
-#         eDP-1    auto               1.5
-# Written by Settings > Display. "auto" keeps the screen's preferred mode.
-conf="$HOME/.config/termos/outputs.conf"
-dconf="$HOME/.config/termos/display.conf"
+#!/usr/bin/env python3
+"""termOS: resolution and scale for every screen (built-in or external).
 
-case "${1:-apply}" in
-    apply)
-        # older termOS kept the built-in panel's scale in display.conf
-        PANEL=""; SCALE=""
-        [ -f "$dconf" ] && . "$dconf"
-        connected=$(wlr-randr 2>/dev/null | awk '/^[^ \t]/{print $1}')
-        for out in $connected; do
-            mode=""; scale=""
-            if [ -f "$conf" ]; then
-                read -r _ mode scale < <(awk -v o="$out" '$1==o {print; exit}' "$conf")
-            fi
-            if [ -z "$scale" ] && [ "$out" = "$PANEL" ] && [ -n "$SCALE" ]; then
-                scale=$SCALE
-            fi
-            args=()
-            [ -n "$mode" ] && [ "$mode" != auto ] && args+=(--mode "$mode")
-            [ -n "$scale" ] && args+=(--scale "$scale")
-            (( ${#args[@]} )) && wlr-randr --output "$out" "${args[@]}"
-        done ;;
-    *) echo "usage: termos-outputs apply" >&2; exit 1 ;;
-esac
-exit 0
+  termos-outputs apply    apply saved choices; screens without one get a scale
+                          that suits their size (about 150 % on 10" full-HD tablets)
+
+~/.config/termos/outputs.conf lines:  <output> <mode|auto> <scale|auto>
+  HDMI-A-1 1920x1080@60.000Hz 1.25
+  eDP-1    auto               auto
+"""
+import math
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib", "termos"))
+from termosui import core, screens  # noqa: E402
+
+
+def apply():
+    saved = screens.read_saved()
+    legacy = core.read_conf(core.DISPLAY_CONF)      # older termOS kept the panel's scale here
+    for out in screens.connected():
+        name = out["name"]
+        mode, scale = saved.get(name, ("auto", "auto"))
+        if scale == "auto" and name == legacy.get("PANEL") and legacy.get("SCALE"):
+            scale = legacy["SCALE"]
+        args = []
+        if mode != "auto" and mode != screens.current_mode(out):
+            args += ["--mode", mode]
+        try:
+            want = screens.auto_scale(out) if scale == "auto" else float(scale)
+        except ValueError:
+            want = screens.auto_scale(out)
+        if not math.isclose(want, float(out.get("scale", 1)), abs_tol=0.01):
+            args += ["--scale", f"{want:g}"]
+        if args:
+            r = core.run("wlr-randr", "--output", name, *args)
+            if r.returncode:
+                print(f"termos-outputs: {name}: {r.stderr.strip()}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] not in ([], ["apply"]):
+        sys.exit("usage: termos-outputs apply")
+    apply()

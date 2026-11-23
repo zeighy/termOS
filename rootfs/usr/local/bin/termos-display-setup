@@ -1,5 +1,5 @@
 #!/bin/bash
-# termOS: run once per login from labwc autostart.
+# termOS: run at the boot gate ("gate") and again at login from labwc autostart.
 #  - applies saved resolution/scale for every screen (termos-outputs)
 #  - finds the built-in panel (eDP/DSI/LVDS)
 #  - points the touch screen and pen at it (so both follow rotation)
@@ -14,7 +14,8 @@ termos-outputs apply
 panel=$(wlr-randr | awk '/^[^ \t]/{print $1}' | grep -E '^(eDP|DSI|LVDS)' | head -n1)
 [ -n "$panel" ] || exit 0   # no built-in screen (desktop PC): nothing to do
 
-if grep -q TERMOS_PANEL "$rc" 2>/dev/null; then
+# the gate has its own rc.xml with the panel already filled in
+if [ "${1:-}" != gate ] && grep -q TERMOS_PANEL "$rc" 2>/dev/null; then
     sed -i "s/TERMOS_PANEL/$panel/g" "$rc"
     labwc --reconfigure
 fi

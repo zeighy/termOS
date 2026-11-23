@@ -1,0 +1,10 @@
+#!/bin/bash
+# termOS: lock the screen now (Super+L, Quick Settings, screen-off timer).
+#   termos-lock-now [--wait]    --wait returns once the lock screen is showing
+busctl --user --timeout=3 call org.termos.Session /org/termos/Session org.termos.Session Lock >/dev/null || exit 1
+[ "${1:-}" = --wait ] || exit 0
+for _ in $(seq 100); do
+    [ -f "$XDG_RUNTIME_DIR/termos/lock-shown" ] && exit 0
+    sleep 0.05
+done
+exit 1

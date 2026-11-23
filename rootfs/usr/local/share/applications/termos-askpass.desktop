@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=SSH key
+Exec=termos-askpass
+Icon=dialog-password
+NoDisplay=true

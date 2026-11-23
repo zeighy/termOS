@@ -29,17 +29,113 @@ ask()  { local p=$1 d=${2:-} a; read -rp "$p${d:+ [$d]}: " a; printf '%s' "${a:-
 if [[ $ONLINE -eq 0 && ! -f $REPO/termos.db ]]; then
     die "offline package repo missing; use --online"
 fi
-if [[ $(cat /sys/firmware/efi/fw_platform_size 2>/dev/null) == 32 ]]; then
+FW_BITS=$(cat /sys/firmware/efi/fw_platform_size 2>/dev/null || true)
+LOADER='\EFI\systemd\systemd-bootx64.efi'
+if [[ $FW_BITS == 32 ]]; then
+    LOADER='\EFI\systemd\systemd-bootia32.efi'
     say "Note: 32-bit UEFI firmware detected; systemd-boot will be installed in 32-bit mode."
 fi
 
 clear
 cat <<EOF
 ${c_bold}termOS installer${c_off}
-Minimal Arch Linux: labwc desktop, foot terminal, Thunar, Chromium, Remmina.
+Minimal Arch Linux: labwc desktop with PIN lock, foot terminal, Thunar, Chromium, Remmina.
 Package source: $([[ $ONLINE -eq 1 ]] && echo "Arch mirrors (online)" || echo "this USB (offline)")
 
 EOF
+
+# ---------------------------------------------------------------- firmware boot menu
+# bootctl can't do this from arch-chroot: it takes the chroot for a container and skips
+# it, and forced with --variables=yes it writes an entry with an all-zero partition ID,
+# exiting 0 either way. So efibootmgr does it from the live system, and we read it back.
+
+# Linux hands 32-bit firmware 32-bit buffer addresses (efi_thunk_set_variable and
+# friends), cutting off any above 4 GB: the firmware then reads and writes the wrong
+# memory and the installer hangs. Don't touch its variables on such a machine.
+firmware_vars_safe() {
+    [[ $FW_BITS == 32 ]] || return 0
+    local map
+    map=$(grep -E '^[0-9a-f]+-[0-9a-f]+ : System RAM$' /proc/iomem) || return 1
+    ! grep -qE '^[0-9a-f]+-0*[1-9a-f][0-9a-f]{8,} :' <<<"$map"
+}
+
+# Remove entries left by earlier installs on this disk: only systemd-boot ones, and only
+# if their partition is really gone (a cloned disk can carry the same ID).
+forget_old_entries() {
+    local present uuid id menu
+    present=$(lsblk -nro PARTUUID) || return 0
+    for uuid in "${OLD_PARTS[@]}"; do
+        grep -qixF "$uuid" <<<"$present" && continue
+        menu=$(LC_ALL=C efibootmgr) || return 0
+        for id in $(U=$uuid LC_ALL=C awk '
+            /^Boot[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]/ {
+                l = tolower($0)
+                if (index(l, "," tolower(ENVIRON["U"]) ",") && index(l, "\\efi\\systemd\\systemd-boot"))
+                    print substr($0, 5, 4)
+            }' <<<"$menu"); do
+            efibootmgr --quiet --bootnum "$id" --delete-bootnum || true
+        done
+    done
+}
+
+# Success means: the first entry in BootOrder is active and starts this install's loader.
+register_boot_entry() {
+    local uuid menu first entry
+    uuid=$(blkid -c /dev/null -s PARTUUID -o value "$ESP") || return 1
+    forget_old_entries
+    efibootmgr --quiet --create --disk "$DISK" --part 1 --label termOS --loader "$LOADER" || return 1
+    menu=$(LC_ALL=C efibootmgr) || return 1
+    first=$(LC_ALL=C sed -n 's/^BootOrder: \([0-9A-Fa-f]*\).*/\1/p' <<<"$menu")
+    [[ -n $first ]] || return 1
+    entry=$(LC_ALL=C grep -a "^Boot$first\*" <<<"$menu") || return 1
+    [[ ${entry,,} == *",${uuid,,},"* && ${entry,,} == *"${LOADER,,}"* ]]
+}
+
+# ---------------------------------------------------------------- package checks
+# The live system's pacman-init can be missing or half done (stock Arch holds it until
+# internet time sync, so forever when offline), and keys made under a wrong clock are no
+# good. So make fresh ones every run.
+make_keyring() {
+    local dir=/etc/pacman.d/gnupg
+    timeout 30 systemctl stop pacman-init.service 2>/dev/null || true
+    gpgconf --homedir "$dir" --kill all 2>/dev/null || true
+    if [[ -d $dir ]]; then find "$dir" -mindepth 1 -delete 2>/dev/null || true; fi
+    pacman-key --init && pacman-key --populate
+}
+
+# Everything that can be found out without touching the disk: keys, signatures, damaged
+# packages on the USB, or (--online) no network.
+check_packages() {
+    local db log ok=0
+    db=$(mktemp -d); log=$db/log
+    chmod 755 "$db"     # pacman downloads as its unprivileged "alpm" user
+    say "Preparing package keys"
+    if ! make_keyring &>"$log"; then
+        ok=1
+    elif [[ $ONLINE -eq 1 ]]; then
+        say "Checking the connection to the Arch mirrors"
+        pacman -Syp --config "$conf" --dbpath "$db" --cachedir "$db" "${PKGS[@]}" &>"$log" || ok=1
+    else
+        say "Checking the packages on the USB (a minute or two)"
+        # cachedir is the repo itself, so this only verifies and copies nothing
+        pacman -Syw --noconfirm --noprogressbar --config "$conf" --dbpath "$db" \
+            --cachedir "$REPO" "${PKGS[@]}" </dev/null &>"$log" || ok=1
+    fi
+    if (( ok )); then
+        tail -n 6 "$log"
+        echo
+        echo "The tablet's clock says: $(date -u '+%d %B %Y %H:%M') UTC"
+        echo "If that is wrong, set it and run the installer again:"
+        echo "    date -u -s 'YYYY-MM-DD HH:MM' && hwclock --systohc"
+        if [[ $ONLINE -eq 1 ]]; then
+            echo "If it is right, check the network (iwctl), or install offline without --online."
+        else
+            echo "If it is right, this USB is damaged or too old: write a new one, or use --online."
+        fi
+    fi
+    rm -rf "$db"
+    return "$ok"
+}
 
 # ---------------------------------------------------------------- disk
 live_dev=""
@@ -50,14 +146,6 @@ mapfile -t disks < <(lsblk -dpno NAME,TYPE,RO | awk '$2=="disk" && $3==0 {print 
     | grep -Ev '/dev/(loop|zram|sr|fd)|boot[0-9]$|rpmb$' \
     | grep -v "^/dev/${live_dev:-NONE}\$" || true)
 (( ${#disks[@]} )) || die "no installable disk found"
-
-echo "Disks:"
-for i in "${!disks[@]}"; do
-    printf '  %d) %s\n' $((i + 1)) "$(lsblk -dno NAME,SIZE,MODEL "${disks[$i]}" | xargs)"
-done
-choice=$(ask "Install to disk number" 1)
-[[ $choice =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#disks[@]} )) || die "invalid choice"
-DISK=${disks[$((choice - 1))]}
 
 # ---------------------------------------------------------------- hostname
 dmi() { cat "/sys/class/dmi/id/$1" 2>/dev/null || true; }
@@ -76,42 +164,262 @@ make_hostname() {
 HOSTNAME_DEFAULT=$(make_hostname)
 
 # ---------------------------------------------------------------- questions
-echo
-HOST=$(ask "Hostname" "$HOSTNAME_DEFAULT")
-[[ $HOST =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || die "invalid hostname: $HOST"
+# Menus (whiptail, on the live USB) on a real screen; plain prompts otherwise,
+# or with TERMOS_PLAIN=1.
+TUI=0
+if [[ -z ${TERMOS_PLAIN:-} && -t 0 && -t 1 ]] && command -v whiptail >/dev/null; then TUI=1; fi
+TITLE="termOS installer"
+H=0 W=0
+size() {
+    read -r H W < <(stty size 2>/dev/null || echo "24 80")
+    H=$(( H > 30 ? 30 : H - 2 )); W=$(( W > 76 ? 76 : W - 4 ))
+}
+wt() { size; whiptail --backtitle "$TITLE" "$@" 3>&1 1>&2 2>&3; }
+stop_or_go_on() {
+    wt --title "Stop?" --yesno "Stop the installer? Nothing has been changed yet." 8 "$W" || return 0
+    clear; echo "Installer stopped. Nothing was changed. Run termos-install to start again."; exit 1
+}
+note() { if (( TUI )); then wt --title "${2:-termOS}" --msgbox "$1" 12 "$W"; else echo "$1"; fi; }
+# text <var> <question> [default]
+text() {
+    local v
+    while :; do
+        if (( TUI )); then v=$(wt --inputbox "$2" 10 "$W" "${3:-}") || { stop_or_go_on; continue; }
+        else v=$(ask "$2" "${3:-}"); fi
+        printf -v "$1" '%s' "$v"; return 0
+    done
+}
+# secret <var> <question>
+secret() {
+    local v
+    while :; do
+        if (( TUI )); then v=$(wt --passwordbox "$2" 10 "$W") || { stop_or_go_on; continue; }
+        else read -rsp "$2: " v; echo; fi
+        printf -v "$1" '%s' "$v"; return 0
+    done
+}
+# pick <var> <question> <tag> <description> ...   (plain mode: a numbered list)
+pick() {
+    local var=$1 q=$2 v n
+    shift 2
+    local -a pairs=("$@")
+    while :; do
+        if (( TUI )); then
+            size
+            v=$(wt --menu "$q" "$H" "$W" $(( H - 8 )) "${pairs[@]}") || { stop_or_go_on; continue; }
+        else
+            echo "$q"
+            for (( n = 0; n < ${#pairs[@]}; n += 2 )); do
+                printf '  %d) %s  %s\n' $(( n / 2 + 1 )) "${pairs[n]}" "${pairs[n + 1]}"
+            done
+            v=$(ask "Number" 1)
+            if ! [[ $v =~ ^[0-9]+$ ]] || (( v < 1 || v > ${#pairs[@]} / 2 )); then
+                echo "Pick one of the numbers."; continue
+            fi
+            v=${pairs[(v - 1) * 2]}
+        fi
+        printf -v "$var" '%s' "$v"; return 0
+    done
+}
 
-USERNAME=$(ask "Username" "term")
-[[ $USERNAME =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "invalid username (lowercase letters, digits, - and _)"
+if (( TUI )); then
+    wt --title "Welcome" --msgbox "This installs termOS: a minimal Arch Linux with a touch desktop, \
+PIN lock, terminal, SSH, browser and remote desktop.
+
+Packages come from $([[ $ONLINE -eq 1 ]] && echo "the Arch mirrors (online)" || echo "this USB, so no internet is needed").
+
+Use the arrow keys, Tab and Enter. Nothing is changed until you confirm at the end." 16 "$W"
+fi
+
+items=()
+for d in "${disks[@]}"; do items+=("$d" "$(lsblk -dno SIZE,MODEL "$d" | xargs)"); done
+pick DISK "Install termOS on which disk? It will be erased completely." "${items[@]}"
 
 while :; do
-    read -rsp "Password for $USERNAME: " PW1; echo
-    read -rsp "Repeat password: " PW2; echo
+    text HOST "Name of this device on the network" "$HOSTNAME_DEFAULT"
+    [[ $HOST =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] && break
+    note "Use letters, digits and dashes (no spaces), up to 63 characters." "Device name"
+done
+while :; do
+    text USERNAME "Your user name (lowercase)" "term"
+    [[ $USERNAME =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] && break
+    note "Use lowercase letters, digits, - and _, starting with a letter." "User name"
+done
+while :; do
+    secret PW1 "Password for $USERNAME (for sudo, and if you forget the PIN)"
+    secret PW2 "Repeat the password"
     [[ -n $PW1 && $PW1 == "$PW2" ]] && break
-    echo "Passwords empty or do not match, try again."
+    note "The passwords were empty or did not match. Try again." "Password"
 done
 
+pin_ok() {
+    [[ $1 =~ ^[0-9]{4,10}$ ]] || return 1
+    [[ $1 =~ ^(0+|1+|2+|3+|4+|5+|6+|7+|8+|9+)$ ]] && return 1
+    [[ 01234567890 != *"$1"* && 09876543210 != *"$1"* ]]
+}
+if (( ! TUI )); then
+    echo "The PIN unlocks the screen at every start and after sleep."
+    echo "(Forgot it? The password above unlocks too.)"
+fi
 while :; do
-    TZONE=$(ask "Timezone (e.g. America/New_York, Europe/Berlin)" "UTC")
-    [[ -f /usr/share/zoneinfo/$TZONE ]] && break
-    echo "Unknown timezone. Examples: $(cd /usr/share/zoneinfo && ls -d America/* Europe/* | shuf -n 3 | xargs)"
+    secret PIN1 "PIN for the lock screen (4-10 digits). It unlocks the screen at every start and after sleep"
+    if ! pin_ok "$PIN1"; then
+        note "Use 4 to 10 digits, not one repeated digit or a simple sequence like 1234." "PIN"
+        continue
+    fi
+    secret PIN2 "Repeat the PIN"
+    [[ $PIN1 == "$PIN2" ]] && break
+    note "The PINs do not match. Try again." "PIN"
 done
+unset PIN2
 
-KEYMAP=$(ask "Keyboard layout (us, uk, de, fr, ...)" "us")
-XKB=$KEYMAP; [[ $KEYMAP == uk ]] && XKB=gb
+if (( TUI )); then
+    region="" city=""
+    items=(UTC "")
+    for r in Africa America Antarctica Asia Atlantic Australia Europe Indian Pacific; do items+=("$r" ""); done
+    pick region "Time zone: pick a region." "${items[@]}"
+    TZONE=$region
+    if [[ $region != UTC ]]; then
+        items=()
+        while IFS= read -r z; do items+=("$z" ""); done \
+            < <(cd "/usr/share/zoneinfo/$region" && find . -type f | sed 's|^\./||' | sort)
+        pick city "Time zone: pick the city nearest to you." "${items[@]}"
+        TZONE=$region/$city
+    fi
+else
+    while :; do
+        TZONE=$(ask "Timezone (e.g. America/New_York, Europe/Berlin)" "UTC")
+        [[ -f /usr/share/zoneinfo/$TZONE ]] && break
+        echo "Unknown timezone. Examples: $(cd /usr/share/zoneinfo && ls -d America/* Europe/* | shuf -n 3 | xargs)"
+    done
+fi
 
-echo
-echo "${c_bold}Summary${c_off}"
-echo "  Disk:      $DISK  ($(lsblk -dno SIZE,MODEL "$DISK" | xargs))  ${c_red}${c_bold}<- EVERYTHING ON IT WILL BE ERASED${c_off}"
-echo "  Hostname:  $HOST"
-echo "  User:      $USERNAME (sudo, auto-login)"
-echo "  Timezone:  $TZONE    Keyboard: $KEYMAP"
-echo
-[[ $(ask "Type 'yes' to wipe $DISK and install") == yes ]] || die "aborted"
+if (( TUI )); then
+    pick KEYMAP "Keyboard layout" us "English (US)" uk "English (UK)" de "German" fr "French" \
+        es "Spanish" it "Italian" other "Other..."
+    while [[ $KEYMAP == other ]]; do
+        text KEYMAP "Console keyboard layout name (for example dk, no, sv-latin1, pt-latin1)" ""
+        [[ -n $KEYMAP && -n $(find /usr/share/kbd/keymaps -name "$KEYMAP.map.gz" -print -quit 2>/dev/null) ]] && break
+        note "There is no keyboard layout called \"$KEYMAP\"." "Keyboard"
+        KEYMAP=other
+    done
+    loadkeys "$KEYMAP" &>/dev/null || true
+else
+    KEYMAP=$(ask "Keyboard layout (us, uk, de, fr, ...)" "us")
+fi
+XKB=${KEYMAP%%-*}
+[[ $KEYMAP == uk ]] && XKB=gb
+
+# ---------------------------------------------------------------- Wi-Fi
+# Optional, and kept for the installed system (as a NetworkManager connection).
+WIFI_SSID="" WIFI_PSK="" WIFI_SEC=""
+wifi_dev=""
+if compgen -G '/sys/class/net/*/wireless' >/dev/null; then
+    # the first device iwd runs as a Wi-Fi client
+    wifi_dev=$(iwctl station list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' \
+        | awk '/^-+ *$/ { n++; next } n >= 2 && NF { print $1; exit }')
+    [[ -n $wifi_dev && -e /sys/class/net/$wifi_dev/wireless ]] || wifi_dev=""
+fi
+wifi_networks() {   # "security<TAB>name" per network, as iwctl lists them (strongest first)
+    iwctl station "$wifi_dev" scan &>/dev/null
+    sleep 4
+    iwctl station "$wifi_dev" get-networks 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | awk '
+        function trim(x) { sub(/^ +/, "", x); sub(/ +$/, "", x); return x }
+        # columns by the header position, so names may contain any spaces
+        /Network name/ { ns = index($0, "Network name"); ss = index($0, "Security")
+                         gs = index($0, "Signal"); next }
+        !ns || /^-+ *$/ || !NF { next }
+        { name = trim(substr($0, ns, ss - ns)); sec = trim(substr($0, ss, gs - ss))
+          if (name != "" && sec != "") print sec "\t" name }'
+}
+wifi_connected() { iwctl station "$wifi_dev" show 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | grep -q 'State *connected'; }
+if (( TUI )) && [[ -n $wifi_dev ]]; then
+    while wt --title "Wi-Fi" --yesno "Connect to Wi-Fi now? termOS will join the same network after installing. \
+(Not needed to install from this USB.)" 10 "$W"; do
+        wt --title "Wi-Fi" --infobox "Looking for networks..." 7 "$W"
+        mapfile -t nets < <(wifi_networks)
+        if (( ! ${#nets[@]} )); then note "No networks found." "Wi-Fi"; continue; fi
+        items=()
+        for n in "${nets[@]}"; do
+            case ${n%%$'\t'*} in
+                open) kind="open" ;; 8021x) kind="company login" ;; *) kind="password" ;;
+            esac
+            items+=("${n#*$'\t'}" "$kind")
+        done
+        size
+        ssid=$(wt --menu "Pick your network" "$H" "$W" $(( H - 8 )) "${items[@]}") || continue
+        WIFI_SEC=""
+        for n in "${nets[@]}"; do [[ ${n#*$'\t'} == "$ssid" ]] && { WIFI_SEC=${n%%$'\t'*}; break; }; done
+        if [[ $WIFI_SEC == 8021x ]]; then
+            note "Networks that ask for a user name (802.1X) can be set up after installing, in Settings." "Wi-Fi"
+            continue
+        fi
+        psk=""
+        if [[ $WIFI_SEC != open ]]; then psk=$(wt --passwordbox "Password for $ssid" 10 "$W") || continue; fi
+        wt --title "Wi-Fi" --infobox "Connecting to $ssid..." 7 "$W"
+        if [[ -n $psk ]]; then iwctl --passphrase "$psk" station "$wifi_dev" connect "$ssid" &>/dev/null || true
+        else iwctl station "$wifi_dev" connect "$ssid" &>/dev/null || true; fi
+        for _ in $(seq 15); do wifi_connected && break; sleep 1; done
+        if wifi_connected; then
+            WIFI_SSID=$ssid WIFI_PSK=$psk
+            note "Connected to $ssid." "Wi-Fi"
+            break
+        fi
+        note "Could not connect to $ssid. Check the password and try again." "Wi-Fi"
+    done
+fi
+
+summary="Disk:       $DISK ($(lsblk -dno SIZE,MODEL "$DISK" | xargs))
+Device:     $HOST
+User:       $USERNAME (sudo; the desktop unlocks with the PIN)
+Time zone:  $TZONE      Keyboard: $KEYMAP${WIFI_SSID:+
+Wi-Fi:      $WIFI_SSID}"
+if (( TUI )); then
+    wt --title "Erase $DISK and install?" --defaultno --yes-button "Erase and install" --no-button "Stop" \
+        --yesno "$summary
+
+EVERYTHING ON $DISK WILL BE ERASED." 16 "$W" || { clear; echo "Installer stopped. Nothing was changed."; exit 1; }
+    clear
+else
+    echo
+    echo "${c_bold}Summary${c_off}"
+    sed 's/^/  /' <<<"$summary"
+    echo "  ${c_red}${c_bold}EVERYTHING ON $DISK WILL BE ERASED${c_off}"
+    echo
+    [[ $(ask "Type 'yes' to wipe $DISK and install") == yes ]] || die "aborted"
+fi
+
+# ---------------------------------------------------------------- check before erasing
+mapfile -t PKGS < <(grep -Ev '^\s*(#|$)' "$PKGLIST")
+conf=$(mktemp)
+if [[ $ONLINE -eq 1 ]]; then
+    echo "Server = $MIRROR" > /etc/pacman.d/mirrorlist.termos
+    sed 's|^Include = /etc/pacman.d/mirrorlist$|Include = /etc/pacman.d/mirrorlist.termos|' /etc/pacman.conf > "$conf"
+    # prefer the live system's ranked mirror list if reflector produced one
+    grep -q '^Server' /etc/pacman.d/mirrorlist 2>/dev/null && cp /etc/pacman.conf "$conf"
+else
+    siglevel="Required DatabaseOptional"
+    compgen -G "$REPO/*.sig" >/dev/null || siglevel="Optional TrustAll"
+    cat > "$conf" <<EOF
+[options]
+Architecture = auto
+ParallelDownloads = 5
+SigLevel = Required DatabaseOptional
+LocalFileSigLevel = Optional
+
+[termos]
+SigLevel = $siglevel
+Server = file://$REPO
+EOF
+fi
+check_packages || die "cannot install from here. Nothing was erased."
 
 # ---------------------------------------------------------------- partition
 say "Partitioning $DISK"
 umount -R "$MNT" 2>/dev/null || true
 swapoff -a 2>/dev/null || true
+# partition IDs about to be erased, to tidy the firmware's boot menu afterwards
+mapfile -t OLD_PARTS < <(lsblk -nro PARTUUID "$DISK" | grep -Ex '[0-9A-Fa-f-]{36}' || true)
 wipefs -af "$DISK" >/dev/null
 sgdisk --zap-all "$DISK" >/dev/null
 sgdisk -n1:0:+512M -t1:ef00 -c1:EFI \
@@ -129,29 +437,10 @@ mount -o noatime "$ROOT" "$MNT"
 mount --mkdir -o fmask=0077,dmask=0077 "$ESP" "$MNT/boot"
 
 # ---------------------------------------------------------------- packages
-mapfile -t PKGS < <(grep -Ev '^\s*(#|$)' "$PKGLIST")
-conf=$(mktemp)
 if [[ $ONLINE -eq 1 ]]; then
     say "Installing packages from Arch mirrors"
-    echo "Server = $MIRROR" > /etc/pacman.d/mirrorlist.termos
-    sed 's|^Include = /etc/pacman.d/mirrorlist$|Include = /etc/pacman.d/mirrorlist.termos|' /etc/pacman.conf > "$conf"
-    # prefer the live system's ranked mirror list if reflector produced one
-    grep -q '^Server' /etc/pacman.d/mirrorlist 2>/dev/null && cp /etc/pacman.conf "$conf"
 else
     say "Installing packages from the USB (offline)"
-    siglevel="Required DatabaseOptional"
-    compgen -G "$REPO/*.sig" >/dev/null || siglevel="Optional TrustAll"
-    cat > "$conf" <<EOF
-[options]
-Architecture = auto
-ParallelDownloads = 5
-SigLevel = Required DatabaseOptional
-LocalFileSigLevel = Optional
-
-[termos]
-SigLevel = $siglevel
-Server = file://$REPO
-EOF
 fi
 pacstrap -C "$conf" -K "$MNT" "${PKGS[@]}"
 rm -f "$conf"
@@ -176,6 +465,23 @@ else
 fi
 sed -i 's/^#ParallelDownloads.*/ParallelDownloads = 5/; s/^#Color$/Color/' "$MNT/etc/pacman.conf"
 
+if [[ -n $WIFI_SSID ]]; then
+    # NetworkManager keyfile: the name as a byte list (safe for any characters)
+    nm="$MNT/etc/NetworkManager/system-connections"
+    install -d -m700 "$nm"
+    ssid_bytes=$(printf '%s' "$WIFI_SSID" | od -An -tu1 -v | xargs | tr ' ' ';')
+    psk=${WIFI_PSK//\\/\\\\}
+    [[ $psk == " "* ]] && psk="\\s${psk:1}"
+    {
+        printf '[connection]\nid=%s\ntype=wifi\n\n[wifi]\nmode=infrastructure\nssid=%s;\n\n' \
+            "termOS Wi-Fi" "$ssid_bytes"
+        [[ -n $WIFI_PSK ]] && printf '[wifi-security]\nkey-mgmt=wpa-psk\npsk=%s\n\n' "$psk"
+        printf '[ipv4]\nmethod=auto\n\n[ipv6]\nmethod=auto\n'
+    } > "$nm/termos-wifi.nmconnection"
+    chmod 600 "$nm/termos-wifi.nmconnection"
+fi
+unset WIFI_PSK psk
+
 echo "$HOST" > "$MNT/etc/hostname"
 cat > "$MNT/etc/hosts" <<EOF
 127.0.0.1   localhost
@@ -199,14 +505,6 @@ EOF
 sed -i "s/^PRESETS=.*/PRESETS=('default')/" "$MNT/etc/mkinitcpio.d/linux.preset"
 rm -f "$MNT/boot/initramfs-linux-fallback.img"
 
-# auto-login on tty1 -> ~/.bash_profile starts the desktop
-mkdir -p "$MNT/etc/systemd/system/getty@tty1.service.d"
-cat > "$MNT/etc/systemd/system/getty@tty1.service.d/autologin.conf" <<EOF
-[Service]
-ExecStart=
-ExecStart=-/sbin/agetty -o '-p -f -- \\\\u' --noclear --autologin $USERNAME %I \$TERM
-EOF
-
 root_uuid=$(blkid -s UUID -o value "$ROOT")
 
 arch-chroot "$MNT" /bin/bash -e <<EOF
@@ -214,11 +512,14 @@ locale-gen >/dev/null
 useradd -m -G wheel,video,input,audio -s /bin/bash "$USERNAME"
 passwd -l root >/dev/null
 mkinitcpio -P
-bootctl install --esp-path=/boot
-/usr/local/bin/termos-system-setup
+bootctl install --esp-path=/boot --variables=no
+/usr/local/bin/termos-system-setup --user "$USERNAME"
 EOF
 printf '%s:%s\n' "$USERNAME" "$PW1" | arch-chroot "$MNT" chpasswd
 unset PW1 PW2
+printf '%s\n' "$PIN1" | env -u SUDO_UID arch-chroot "$MNT" /usr/local/bin/termos-pin init "$USERNAME" >/dev/null \
+    || die "could not save the PIN"
+unset PIN1
 
 cat > "$MNT/boot/loader/loader.conf" <<'EOF'
 default termos.conf
@@ -233,6 +534,15 @@ initrd  /initramfs-linux.img
 options root=UUID=$root_uuid rw quiet splash loglevel=3 rd.udev.log_level=3 systemd.show_status=auto nowatchdog
 EOF
 
+BOOT_PROBLEM=""
+if ! firmware_vars_safe; then
+    BOOT_PROBLEM="termOS was not registered with the firmware: Linux can't safely write
+to 32-bit UEFI on a machine with memory above 4 GB."
+else
+    say "Registering termOS with the firmware"
+    register_boot_entry || BOOT_PROBLEM="the firmware did not accept termOS as its first boot entry."
+fi
+
 # keep the installed system small: drop the copied package cache
 rm -rf "$MNT"/var/cache/pacman/pkg/*
 
@@ -240,6 +550,26 @@ sync
 umount -R "$MNT"
 echo
 say "${c_bold}termOS is installed on $DISK as '$HOST'.${c_off}"
-echo "Remove the USB stick, then reboot (hold Space while booting to see the boot menu)."
-[[ $(ask "Reboot now? (y/n)" y) == y ]] && systemctl reboot
+if [[ -n $BOOT_PROBLEM ]]; then
+    cat <<EOF
+${c_red}${c_bold}WARNING:${c_off} $BOOT_PROBLEM
+It should still start from the disk's standard boot file. If it starts something else,
+put the internal disk first in the firmware's boot order.
+EOF
+fi
+# the live system runs from the stick: pulling it out while Linux still runs crashes it
+done_text="Leave the USB stick in until the tablet is off. Then remove it and switch the tablet on.
+(Hold Space while it starts to see the boot menu.)"
+if (( TUI )); then
+    sleep 3
+    wt --title "termOS is installed" --yes-button "Power off" --no-button "Stay here" \
+        --yesno "termOS is installed on $DISK as '$HOST'.${BOOT_PROBLEM:+
+
+WARNING: $BOOT_PROBLEM}
+
+$done_text" 16 "$W" && systemctl poweroff
+    exit 0
+fi
+echo "$done_text"
+[[ $(ask "Power off now? (y/n)" y) == y ]] && systemctl poweroff
 exit 0

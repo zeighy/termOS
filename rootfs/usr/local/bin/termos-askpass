@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""termOS prompts for ssh and ssh-agent when there is no terminal to ask in:
+security-key PINs, "touch your key", passwords. (SSH_ASKPASS)
+
+The answer goes to stdout, never into arguments.
+"""
+import os
+import signal
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib", "termos"))
+from termosui import ui  # noqa: E402
+
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+
+
+def main():
+    prompt = " ".join(sys.argv[1:]).strip() or "Enter the passphrase"
+    kind = os.environ.get("SSH_ASKPASS_PROMPT", "")
+    GLib.set_prgname("termos-askpass")
+    ui.setup()
+    win = ui.classes(Gtk.Window(title="SSH key"), "termos")
+    win.set_icon_name("dialog-password")
+    win.set_default_size(520, 260)
+    box = ui.vbox(12)
+    box.set_border_width(24)
+    result = {"code": 1}
+
+    def finish(code):
+        result["code"] = code
+        Gtk.main_quit()
+
+    touch = kind == "none"
+    # a new server's fingerprint is a question, answered in words on stdout
+    host_check = not kind and "(yes/no" in prompt
+
+    def answer(word):
+        sys.stdout.write(word + "\n")
+        sys.stdout.flush()
+        finish(0)
+    title = ("Touch your security key" if touch else "Allow this?" if kind == "confirm"
+             else "Trust this machine?" if host_check
+             else "Enter the PIN, then touch your key" if "user presence" in prompt
+             else "PIN or password needed")
+    box.pack_start(ui.icon("key", "hero", "accent"), False, False, 4)
+    box.pack_start(ui.label(title, "title", xalign=0.5, wrap=True), False, False, 0)
+    box.pack_start(ui.label(prompt, "sub", xalign=0.5, wrap=True), False, False, 0)
+    line = ui.hbox(8)
+    line.set_homogeneous(True)
+    if touch:
+        # ssh-agent ends this process once the key was touched; closing only hides the note
+        line.add(ui.button("Hide", lambda: finish(0)))
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    elif kind == "confirm":
+        line.add(ui.button("Deny", lambda: finish(1)))
+        line.add(ui.button("Allow", lambda: finish(0), "primary"))
+    elif host_check:
+        line.add(ui.button("No", lambda: answer("no")))
+        line.add(ui.button("Trust", lambda: answer("yes"), "primary"))
+    else:
+        entry = Gtk.Entry(visibility=False, placeholder_text="PIN or passphrase")
+        entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+
+        def submit():
+            sys.stdout.write(entry.get_text() + "\n")
+            sys.stdout.flush()
+            finish(0)
+        entry.connect("activate", lambda _e: submit())
+        box.pack_start(entry, False, False, 0)
+        line.add(ui.button("Cancel", lambda: finish(1)))
+        line.add(ui.button("OK", submit, "primary"))
+    box.pack_start(line, False, False, 0)
+    win.add(ui.Clamp(box, 520))
+    win.connect("destroy", lambda _w: Gtk.main_quit())
+
+    def key(_w, event):
+        if event.keyval == Gdk.KEY_Escape:
+            finish(1)
+            return True
+        return False
+    win.connect("key-press-event", key)
+    win.show_all()
+    if not touch and not host_check and kind != "confirm":
+        entry.grab_focus()
+    Gtk.main()
+    return result["code"]
+
+
+if __name__ == "__main__":
+    sys.exit(main())

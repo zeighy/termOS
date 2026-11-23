@@ -1,9 +1,3 @@
 #!/bin/bash
-# termOS: toggle the full-screen app drawer.
-if pgrep -u "$USER" -x nwg-drawer >/dev/null; then
-    pkill -u "$USER" -x nwg-drawer; exit 0
-fi
-exec nwg-drawer -ovl -nofs -c 5 -is 72 -spacing 28 -closebtn right \
-    -i Papirus-Dark -term foot -fm thunar \
-    -pbsleep "systemctl suspend" -pbreboot "systemctl reboot" \
-    -pbpoweroff "systemctl poweroff" -pbsize 56
+# termOS: show or hide the apps tray (drawn by termos-shell).
+exec termos-show apps

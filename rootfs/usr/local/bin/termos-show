@@ -1,0 +1,9 @@
+#!/bin/bash
+# termOS: ask the desktop shell to show something.
+#   termos-show apps|quick|power|windows|desktop|volume|brightness|reload
+case "${1:-}" in
+    apps|quick|power|windows|desktop|volume|brightness|reload) ;;
+    *) sed -n '2,3p' "$0" >&2; exit 1 ;;
+esac
+exec gdbus call --session --timeout 3 --dest org.termos.Shell --object-path /org/termos/Shell \
+    --method org.gtk.Actions.Activate "$1" '[]' '{}' >/dev/null

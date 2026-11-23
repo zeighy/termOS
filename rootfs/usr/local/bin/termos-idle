@@ -1,42 +1,71 @@
 #!/bin/bash
-# termOS idle handling (swayidle): dim -> screen off -> sleep.
-#   termos-idle start|restart   (re)start swayidle with times from settings
-#   termos-idle dim|undim|maybe-sleep bat|ac   (internal, called by swayidle)
+# termOS idle handling (swayidle): dim -> screen off (and lock) -> sleep.
+#   termos-idle start|restart   (re)start swayidle with the times from Settings
+#   termos-idle gate            fixed, short times for the lock screen at boot
+#   termos-idle stop
+#   termos-idle dim|undim|wake|screen-off|maybe-sleep bat|ac   (internal)
 # Settings (seconds, 0 = never) in ~/.config/termos/settings.conf:
-#   IDLE_DIM=120 IDLE_OFF=300 IDLE_SLEEP_BAT=900 IDLE_SLEEP_AC=0
-# Apps that play video (mpv, Chromium) block idle automatically, and the
-# panel's ☕ button keeps the screen on while enabled.
+#   IDLE_DIM=120 IDLE_OFF=300 IDLE_SLEEP_BAT=900 IDLE_SLEEP_AC=0 LOCK_SCREEN_OFF=1
+# Apps that play video (mpv, Chromium) block idle automatically, and "Keep awake"
+# in Quick Settings keeps the screen on while enabled.
+# termos-session-watch restarts this when the charger is plugged in or removed:
+# swayidle timers only fire once, so without that a tablet that went idle on
+# mains and was then unplugged would never sleep.
 conf="$HOME/.config/termos/settings.conf"
-IDLE_DIM=120; IDLE_OFF=300; IDLE_SLEEP_BAT=900; IDLE_SLEEP_AC=0
+IDLE_DIM=120; IDLE_OFF=300; IDLE_SLEEP_BAT=900; IDLE_SLEEP_AC=0; LOCK_SCREEN_OFF=1
 [ -f "$conf" ] && . "$conf"
 saved="${XDG_RUNTIME_DIR:-/tmp}/termos-brightness"
+awake="${XDG_RUNTIME_DIR:-/tmp}/termos-awake"      # "Keep awake" in Quick Settings
 
 on_battery() {
     local s
     for s in /sys/class/power_supply/*; do
         [ "$(cat "$s/type" 2>/dev/null)" = Battery ] || continue
+        [ "$(cat "$s/scope" 2>/dev/null)" = Device ] && continue    # mouse, pen, headset
         [ "$(cat "$s/status" 2>/dev/null)" = Discharging ] && return 0
     done
     return 1
 }
+stop() {
+    pkill -u "$(id -u)" -x swayidle
+    for _ in $(seq 20); do pgrep -u "$(id -u)" -x swayidle >/dev/null || return 0; sleep 0.05; done
+}
+undim() {
+    [ -f "$saved" ] && brightnessctl -c backlight -q set "$(cat "$saved")" && rm -f "$saved"
+}
+wake() {
+    wlopm --on '*' >/dev/null 2>&1
+    undim
+}
 
 case "${1:-start}" in
     start|restart)
-        pkill -u "$USER" -x swayidle
+        stop; wake      # a killed swayidle never runs its "resume" commands
         args=(-w)
+        if [ -f "$awake" ]; then IDLE_DIM=0; IDLE_OFF=0; IDLE_SLEEP_BAT=0; IDLE_SLEEP_AC=0; fi
         [ "${IDLE_DIM:-0}" -gt 0 ] && args+=(timeout "$IDLE_DIM" "termos-idle dim" resume "termos-idle undim")
-        [ "${IDLE_OFF:-0}" -gt 0 ] && args+=(timeout "$IDLE_OFF" "wlopm --off '*'" resume "wlopm --on '*'")
+        [ "${IDLE_OFF:-0}" -gt 0 ] && args+=(timeout "$IDLE_OFF" "termos-idle screen-off" resume "termos-idle wake")
         [ "${IDLE_SLEEP_BAT:-0}" -gt 0 ] && args+=(timeout "$IDLE_SLEEP_BAT" "termos-idle maybe-sleep bat")
         [ "${IDLE_SLEEP_AC:-0}" -gt 0 ] && args+=(timeout "$IDLE_SLEEP_AC" "termos-idle maybe-sleep ac")
-        args+=(before-sleep "termos-idle undim" after-resume "wlopm --on '*'")
+        args+=(after-resume "termos-idle wake")
         setsid -f swayidle "${args[@]}" >/dev/null 2>&1 ;;
+    gate)
+        stop; wake
+        setsid -f swayidle -w timeout 90 "wlopm --off '*'" resume "termos-idle wake" \
+            timeout 300 "termos-idle maybe-sleep bat" after-resume "termos-idle wake" >/dev/null 2>&1 ;;
+    stop)
+        stop; wake ;;
     dim)
-        cur=$(brightnessctl -c backlight -m 2>/dev/null | cut -d, -f3) || exit 0
-        [ -n "$cur" ] || exit 0
-        echo "$cur" > "$saved"
+        IFS=, read -r _ _ cur pct _ < <(brightnessctl -c backlight -m 2>/dev/null)
+        pct=${pct%\%}
+        [ -n "$cur" ] && [ "${pct:-0}" -gt 10 ] || exit 0
+        [ -f "$saved" ] || echo "$cur" > "$saved"
         brightnessctl -c backlight -q set 10% ;;
-    undim)
-        [ -f "$saved" ] && brightnessctl -c backlight -q set "$(cat "$saved")" && rm -f "$saved" ;;
+    undim) undim ;;
+    wake) wake ;;
+    screen-off)
+        if [ "${LOCK_SCREEN_OFF:-1}" = 1 ]; then termos-lock-now --wait; fi
+        wlopm --off '*' >/dev/null 2>&1 ;;
     maybe-sleep)
         if [ "$2" = bat ] && on_battery; then systemctl suspend; fi
         if [ "$2" = ac ] && ! on_battery; then systemctl suspend; fi ;;

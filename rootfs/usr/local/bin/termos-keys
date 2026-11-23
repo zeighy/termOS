@@ -1,0 +1,3 @@
+#!/bin/bash
+# termOS: the Security keys page of Settings, as an entry of its own in the apps tray.
+exec termos-settings keys

@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<labwc_config>
+  <!-- termOS boot gate (see termos-session): the screen before the PIN.
+       labwc loads its default shortcuts and menus when a config has no
+       bindings at all, so each section holds one harmless binding. -->
+  <core><gap>0</gap></core>
+  <touch mapToOutput="TERMOS_PANEL" mouseEmulation="no" />
+  <tablet mapToOutput="TERMOS_PANEL" />
+  <libinput>
+    <device category="touchpad"><tap>yes</tap></device>
+  </libinput>
+  <keyboard>
+    <keybind key="XF86MonBrightnessUp" allowWhenLocked="yes"><action name="Execute" command="termos-brightness up" /></keybind>
+    <keybind key="XF86MonBrightnessDown" allowWhenLocked="yes"><action name="Execute" command="termos-brightness down" /></keybind>
+  </keyboard>
+  <mouse>
+    <context name="Client"><mousebind button="Left" action="Press"><action name="Focus" /></mousebind></context>
+  </mouse>
+</labwc_config>

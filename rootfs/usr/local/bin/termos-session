@@ -1,5 +1,14 @@
-#!/bin/sh
-# termOS: start the Wayland desktop (called from ~/.bash_profile on tty1).
+#!/bin/bash
+# termOS desktop session, started by termos-desktop@<user>.service on tty1.
+#
+# Two stages, so that nothing can be reached before the PIN:
+#   1. gate:    a labwc with no keybindings, menus, panel or autostart, running
+#               only the lock screen. Ends when the lock screen exits.
+#   2. desktop: started only if the gate left its "passed" mark.
+# Any failure exits, and systemd starts again at stage 1.
+trap ':' INT QUIT TSTP      # keys typed on the bare console must not interrupt this
+PATH=/usr/local/bin:/usr/bin:/usr/local/sbin
+export PATH
 [ -r /etc/termos/session.env ] && . /etc/termos/session.env
 export XDG_CURRENT_DESKTOP=labwc:wlroots
 export XDG_SESSION_DESKTOP=labwc
@@ -7,4 +16,32 @@ export XDG_SESSION_TYPE=wayland
 export MOZ_ENABLE_WAYLAND=1
 export QT_QPA_PLATFORM="wayland;xcb"
 export ELECTRON_OZONE_PLATFORM_HINT=auto
+# socket-activated ssh-agent, for keys on security keys and smart cards
+[ -n "${SSH_AUTH_SOCK:-}" ] || export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent.socket"
+# ssh started without a terminal asks in a window (in a terminal it still asks there).
+# git would prefer that window even in a terminal; an empty GIT_ASKPASS stops that.
+export SSH_ASKPASS="${SSH_ASKPASS:-/usr/local/bin/termos-askpass}"
+export GIT_ASKPASS="${GIT_ASKPASS-}"
+cd "$HOME" || exit 1
+
+run="${XDG_RUNTIME_DIR:?no user session}/termos"
+(umask 077; mkdir -p "$run/gate") || exit 1
+passed="$run/gate-passed"
+rm -f "$passed" "$run/lock-wanted" "$run/lock-shown" "$run/lock.pid" "$run/unlocked" \
+    "$XDG_RUNTIME_DIR/termos-awake" "$XDG_RUNTIME_DIR/termos-osk-wanted"
+[ ! -e "$passed" ] || exit 1
+
+# the gate has its own config, so it needs the panel name and layout handed to it
+panel=""
+for c in /sys/class/drm/card*-eDP-* /sys/class/drm/card*-DSI-* /sys/class/drm/card*-LVDS-*; do
+    [ "$(cat "$c/status" 2>/dev/null)" = connected ] || continue
+    panel=${c##*/}; panel=${panel#*-}; break
+done
+layout=$(sed -n 's/^XKB_DEFAULT_LAYOUT=//p' "$HOME/.config/labwc/environment" 2>/dev/null | tail -n1)
+[ -n "$layout" ] && export XKB_DEFAULT_LAYOUT=$layout
+sed "s/TERMOS_PANEL/${panel:-none}/g" /usr/local/share/termos/gate-rc.xml > "$run/gate/rc.xml" || exit 1
+
+labwc -C "$run/gate" -S termos-gate
+[ -f "$passed" ] || { sleep 1; exit 1; }
+rm -f "$passed"
 exec labwc

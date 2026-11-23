@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""termOS session guard.
+
+  * locks the screen before every sleep (holding a logind delay lock until the
+    lock screen is really up) and checks again on wake-up
+  * supervises the lock screen: if it dies while locked, it starts again
+  * "termos-lock-now" and "loginctl lock-session" lock through here
+  * restarts the idle timers when the charger is plugged in or removed
+
+termos-session-guard restarts this program if it ever exits.
+"""
+import os
+import signal
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib", "termos"))
+from termosui import core  # noqa: E402
+
+from gi.repository import Gio, GLib  # noqa: E402
+
+LOCKER = os.path.join(os.path.dirname(os.path.realpath(__file__)), "termos-lock")
+WANTED = os.path.join(core.RUN_DIR, "lock-wanted")
+SHOWN = os.path.join(core.RUN_DIR, "lock-shown")
+UNLOCKED = os.path.join(core.RUN_DIR, "unlocked")
+PIDFILE = os.path.join(core.RUN_DIR, "lock.pid")
+
+
+def remove(path):
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
+class Watch:
+    def __init__(self):
+        os.makedirs(core.RUN_DIR, 0o700, exist_ok=True)
+        self.child = None
+        self.inhibitor = None
+        self.want_relock = False
+        self.sleeping = False
+        self.logind = None
+        self.was_on_battery = core.on_battery()
+        self.stop_orphan()
+        if os.path.exists(WANTED) and not os.path.exists(UNLOCKED):
+            self.start_locker()     # we were restarted while locked
+        else:
+            remove(WANTED)
+        self.session_bus = Gio.bus_own_name(Gio.BusType.SESSION, "org.termos.Session",
+                                            Gio.BusNameOwnerFlags.NONE, self.export, None, None)
+        try:
+            self.logind = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+            self.logind.signal_subscribe("org.freedesktop.login1", "org.freedesktop.login1.Manager",
+                                         "PrepareForSleep", "/org/freedesktop/login1", None,
+                                         Gio.DBusSignalFlags.NONE, self.sleep_signal)
+            self.logind.signal_subscribe("org.freedesktop.login1", "org.freedesktop.login1.Session",
+                                         "Lock", None, None, Gio.DBusSignalFlags.NONE,
+                                         lambda *_a: self.lock())
+            self.take_inhibitor()
+        except GLib.Error as e:
+            print(f"termos-session-watch: no logind: {e.message}", file=sys.stderr)
+        GLib.timeout_add_seconds(5, self.check_power)
+
+    # ---- lock screen ------------------------------------------------------
+    def stop_orphan(self):
+        pid = core.slurp(PIDFILE)
+        if pid.isdigit() and "termos-lock" in core.slurp(f"/proc/{pid}/cmdline"):
+            try:
+                os.kill(int(pid), signal.SIGKILL)   # the screen stays locked without it
+            except OSError:
+                pass
+
+    def lock(self):
+        if self.child:
+            if os.path.exists(UNLOCKED):
+                self.want_relock = True     # caught it on its way out
+            return
+        core.write_atomic(WANTED, "1\n", 0o600)
+        remove(UNLOCKED)
+        self.start_locker()
+
+    def start_locker(self):
+        if self.child:
+            return False
+        remove(SHOWN)
+        try:
+            proc = subprocess.Popen([LOCKER], stdin=subprocess.DEVNULL)
+        except OSError as e:
+            print(f"termos-session-watch: can't start the lock screen: {e}", file=sys.stderr)
+            GLib.timeout_add(1000, self.start_locker)
+            return False
+        self.child = proc
+        core.write_atomic(PIDFILE, f"{proc.pid}\n", 0o600)
+        GLib.child_watch_add(GLib.PRIORITY_DEFAULT, proc.pid, self.locker_gone)
+        return False
+
+    def locker_gone(self, pid, status):
+        GLib.spawn_close_pid(pid)
+        self.child.returncode = status
+        self.child = None
+        remove(PIDFILE)
+        remove(SHOWN)
+        if status != 0 or not os.path.exists(UNLOCKED):
+            remove(UNLOCKED)
+            GLib.timeout_add(300, self.start_locker)    # crashed, killed or refused
+            return
+        remove(WANTED)
+        if self.want_relock:
+            self.want_relock = False
+            self.lock()
+
+    def is_shown(self):
+        return os.path.exists(SHOWN) and self.child is not None and not os.path.exists(UNLOCKED)
+
+    # ---- sleep ------------------------------------------------------------
+    def take_inhibitor(self):
+        if self.inhibitor is not None or not self.logind:
+            return False
+        try:
+            res, fds = self.logind.call_with_unix_fd_list_sync(
+                "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager",
+                "Inhibit", GLib.Variant("(ssss)", ("sleep", "termOS", "Lock the screen before sleep", "delay")),
+                GLib.VariantType("(h)"), Gio.DBusCallFlags.NONE, 5000, None, None)
+            self.inhibitor = fds.get(res.unpack()[0])
+        except GLib.Error as e:
+            print(f"termos-session-watch: no sleep lock: {e.message}", file=sys.stderr)
+            GLib.timeout_add_seconds(5, self.take_inhibitor)
+        return False
+
+    def release_inhibitor(self):
+        if self.sleeping and self.inhibitor is not None:
+            os.close(self.inhibitor)
+            self.inhibitor = None
+        return False
+
+    def sleep_signal(self, _con, _sender, _path, _iface, _name, params):
+        self.sleeping = params.unpack()[0]
+        if self.sleeping:
+            self.lock()
+            self.wait_for_lock()
+        else:
+            self.lock()         # normally already up; covers a suspend that beat the inhibitor
+            self.take_inhibitor()
+            core.spawn("termos-idle", "wake")
+            core.spawn("termos-bluetooth", "restore")
+
+    def wait_for_lock(self):
+        def check():
+            if self.inhibitor is None or not self.sleeping:
+                return False
+            if self.is_shown():
+                # a moment for the lock frame to reach the panel before the GPU stops
+                GLib.timeout_add(350, self.release_inhibitor)
+                return False
+            return True
+        if check():
+            GLib.timeout_add(50, check)
+
+    # ---- power ------------------------------------------------------------
+    def check_power(self):
+        now = core.on_battery()
+        if now != self.was_on_battery:
+            self.was_on_battery = now
+            core.spawn("termos-idle", "restart")
+        return True
+
+    # ---- D-Bus ------------------------------------------------------------
+    XML = """<node><interface name="org.termos.Session">
+               <method name="Lock"/>
+             </interface></node>"""
+
+    def export(self, con, _name):
+        def call(_con, _sender, _path, _iface, _method, _params, invocation):
+            self.lock()
+            invocation.return_value(None)
+        con.register_object("/org/termos/Session",
+                            Gio.DBusNodeInfo.new_for_xml(self.XML).interfaces[0], call, None, None)
+
+
+def main():
+    watch = Watch()
+    GLib.MainLoop().run()
+    del watch       # it has to outlive the loop
+
+
+if __name__ == "__main__":
+    main()

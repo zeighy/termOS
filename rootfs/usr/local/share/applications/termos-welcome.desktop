@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Welcome
+Comment=Screen size, Wi-Fi, time zone and your first machine
+Exec=termos-welcome
+Icon=system-help
+Categories=Settings;

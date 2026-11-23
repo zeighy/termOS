@@ -3,24 +3,32 @@
 import os
 import pwd
 import signal
+import sys
+import time
 
-import gi
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib", "termos"))
+from termosui import apps, core, ui  # noqa: E402
 
-gi.require_version("Gtk", "3.0")
-from gi.repository import GLib, Gtk  # noqa: E402
+from gi.repository import Gio, GLib, Gtk, Pango  # noqa: E402
 
 TICK = os.sysconf("SC_CLK_TCK")
-NCPU = os.cpu_count() or 1
+PAGE_KB = os.sysconf("SC_PAGE_SIZE") // 1024
 ME = os.getuid()
-CSS = b"""
-window, .background { font-size: 15px; }
-button, entry { min-height: 44px; }
-button { padding: 0 18px; }
-switch { min-width: 64px; min-height: 34px; }
-treeview { font-size: 15px; }
-treeview.view { padding: 0; }
-treeview header button { min-height: 40px; font-weight: bold; }
-.summary { font-size: 13px; opacity: 0.75; }
+C_ICON, C_NAME, C_CPU, C_MEM, C_KEY = range(5)
+# programs without a desktop entry, or whose process name doesn't match it
+FRIENDLY = {
+    "termos-shell": "Desktop shell", "termos-lock": "Lock screen", "termos-session-watch": "Lock service",
+    "termos-updater": "Update termOS", "termos-welcome": "Welcome", "termos-connect": "SSH connection",
+    "termos-battery-monitor": "Battery monitor", "squeekboard": "On-screen keyboard",
+    "labwc": "Window manager", "mako": "Notifications", "swaybg": "Wallpaper", "swayidle": "Idle timer",
+    "pipewire": "Sound", "pipewire-pulse": "Sound", "wireplumber": "Sound", "bash": "Shell (bash)",
+}
+HELPERS = ("glycin", "bwrap", "dbus-", "chrome_crashpad")
+NOT_APPS = {"termos-show", "termos-osk", "termos-screenshot", "termos-apps"}
+CSS = """
+.tasks treeview.view {{ background-color: {card}; font-size: 15px; }}
+.tasks treeview.view:selected {{ background-color: {raised}; color: {bright}; }}
+.tasks treeview header button {{ min-height: 40px; border-radius: 0; background-color: {mantle}; }}
 """
 
 
@@ -32,251 +40,327 @@ def human(kb):
     return f"{kb} kB"
 
 
-def meminfo():
-    d = {}
-    try:
-        with open("/proc/meminfo") as f:
-            for line in f:
-                k, v = line.split(":", 1)
-                d[k] = int(v.split()[0])
-    except (OSError, ValueError):
-        pass
-    return d
+def username(uid, cache={}):
+    if uid not in cache:
+        try:
+            cache[uid] = pwd.getpwuid(uid).pw_name
+        except KeyError:
+            cache[uid] = str(uid)
+    return cache[uid]
 
 
-def total_jiffies():
-    try:
-        with open("/proc/stat") as f:
-            return sum(int(x) for x in f.readline().split()[1:9])
-    except (OSError, ValueError):
-        return 0
+def program_name(comm, argv):
+    """The script's name for interpreters, otherwise the program's."""
+    if comm.startswith("python") or comm in ("bash", "sh"):
+        for arg in argv[1:3]:
+            if arg.startswith("/") and not arg.startswith("-"):
+                return os.path.basename(arg)
+        return comm
+    # comm is cut at 15 characters
+    if len(comm) == 15 and argv:
+        base = os.path.basename(argv[0].split(" ")[0])
+        if base.startswith(comm):
+            return base
+    return comm
 
 
 def read_procs():
-    """pid -> (name, user, rss_kb, cpu_jiffies, uid, cmdline)"""
-    out = {}
-    pagekb = os.sysconf("SC_PAGE_SIZE") // 1024
+    procs = {}
     for ent in os.listdir("/proc"):
         if not ent.isdigit():
             continue
         try:
-            with open(f"/proc/{ent}/stat") as f:
+            with open(f"/proc/{ent}/stat", encoding="utf-8", errors="replace") as f:
                 raw = f.read()
             # comm is in parentheses and may contain spaces/parens
             lp, rp = raw.index("("), raw.rindex(")")
-            comm = raw[lp + 1:rp]
             rest = raw[rp + 2:].split()
-            utime, stime = int(rest[11]), int(rest[12])
-            rss = int(rest[21]) * pagekb
             uid = os.stat(f"/proc/{ent}").st_uid
             with open(f"/proc/{ent}/cmdline", "rb") as f:
-                cmd = f.read().replace(b"\0", b" ").decode(errors="replace").strip()
+                argv = [a for a in f.read().decode(errors="replace").split("\0") if a]
+            with open(f"/proc/{ent}/statm", encoding="ascii") as f:
+                statm = f.read().split()
         except (OSError, ValueError, IndexError):
             continue
-        if not cmd and not rss:
-            continue  # kernel thread
-        out[int(ent)] = (comm, uid, rss, utime + stime, cmd)
-    return out
+        rss, shared = int(statm[1]), int(statm[2])
+        if not argv and not rss:
+            continue        # kernel thread
+        comm = raw[lp + 1:rp]
+        procs[int(ent)] = {
+            "pid": int(ent), "ppid": int(rest[1]), "uid": uid, "started": rest[19],
+            "jiffies": int(rest[11]) + int(rest[12]),
+            # private memory, so programs with many processes aren't counted several times over
+            "mem": max(rss - shared, 0) * PAGE_KB,
+            "cmd": " ".join(argv), "name": program_name(comm, argv),
+        }
+    return procs
 
 
-_users = {}
+def app_index():
+    index = {}
+    for app in apps.installed():
+        exe = os.path.basename(app.get_executable() or "")
+        # entries like "foot -e something" would claim every terminal
+        command = (app.get_commandline() or "").split()
+        if exe and exe not in NOT_APPS and not (exe == "foot" and "-e" in command):
+            index.setdefault(exe.lower(), app)
+    return index
 
 
-def username(uid):
-    if uid not in _users:
-        try:
-            _users[uid] = pwd.getpwuid(uid).pw_name
-        except KeyError:
-            _users[uid] = str(uid)
-    return _users[uid]
-
-
-class TaskManager(Gtk.Window):
+class TaskManager(Gtk.ApplicationWindow):
     def __init__(self):
         super().__init__(title="Task Manager")
+        ui.css(CSS)
         self.set_default_size(900, 640)
+        self.set_icon_name("utilities-system-monitor")
+        self.view = "apps"
+        self.sort = "cpu"
         self.prev = {}
-        self.prev_total = total_jiffies()
-        self.paused = False
+        self.prev_at = time.monotonic()
+        self.items = {}
+        self.touched = 0
+        self.index = app_index()
 
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        outer = ui.vbox(10, "tasks")
         outer.set_border_width(12)
         self.add(outer)
 
-        self.summary = Gtk.Label(xalign=0)
-        self.summary.get_style_context().add_class("summary")
+        top = ui.hbox(8)
+        self.tabs = {}
+        for key, text in (("apps", "Apps"), ("all", "Processes")):
+            b = ui.button(text, lambda k=key: self.set_view(k))
+            self.tabs[key] = b
+            top.pack_start(b, False, False, 0)
+        self.search = Gtk.SearchEntry(placeholder_text="Search")
+        self.search.set_width_chars(6)
+        self.search.connect("search-changed", lambda _e: self.render(True))
+        top.pack_start(self.search, True, True, 0)
+        outer.pack_start(top, False, False, 0)
+        self.summary = ui.label("", "sub", wrap=True)
         outer.pack_start(self.summary, False, False, 0)
 
-        bar = Gtk.Box(spacing=8)
-        self.search = Gtk.SearchEntry(placeholder_text="Search")
-        self.search.connect("search-changed", lambda _e: self.filter.refilter())
-        bar.pack_start(self.search, True, True, 0)
-        bar.pack_start(Gtk.Label(label="Only my apps"), False, False, 0)
-        self.mine = Gtk.Switch(active=True, valign=Gtk.Align.CENTER)
-        self.mine.connect("notify::active", lambda *_: self.filter.refilter())
-        bar.pack_start(self.mine, False, False, 0)
-        outer.pack_start(bar, False, False, 0)
+        self.store = Gtk.ListStore(Gio.Icon, str, str, str, str)
+        self.tree = Gtk.TreeView(model=self.store)
+        self.tree.set_enable_search(False)
+        self.columns = {}
 
-        # pid, name, user, cpu, rss_kb, uid, cmdline
-        self.store = Gtk.ListStore(int, str, str, float, int, int, str)
-        self.filter = self.store.filter_new()
-        self.filter.set_visible_func(self.visible)
-        self.sorted = Gtk.TreeModelSort(model=self.filter)
-        self.sorted.set_sort_column_id(3, Gtk.SortType.DESCENDING)
-        self.tree = Gtk.TreeView(model=self.sorted)
-        self.tree.set_tooltip_column(6)
-        self.tree.set_activate_on_single_click(False)
-        cols = [("Name", 1, 360, None), ("CPU", 3, 90, self.fmt_cpu),
-                ("Memory", 4, 110, self.fmt_mem), ("User", 2, 110, None), ("PID", 0, 80, None)]
-        for title, idx, width, fmt in cols:
-            r = Gtk.CellRendererText(ellipsize=3)
-            r.set_padding(8, 10)
-            if idx in (0, 3, 4):  # numeric columns right-aligned
-                r.set_property("xalign", 1.0)
-            col = Gtk.TreeViewColumn(title, r, text=idx)
-            if fmt:
-                col.set_cell_data_func(r, fmt, idx)
-            col.set_sort_column_id(idx)
-            col.set_resizable(True)
+        name_col = Gtk.TreeViewColumn("Name")
+        pix = Gtk.CellRendererPixbuf(xpad=8, stock_size=Gtk.IconSize.DND)
+        name_col.pack_start(pix, False)
+        name_col.add_attribute(pix, "gicon", C_ICON)
+        text = Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END, ypad=9)
+        name_col.pack_start(text, True)
+        name_col.add_attribute(text, "markup", C_NAME)
+        name_col.set_expand(True)
+        self.add_column("name", name_col)
+        for key, title, col_idx, width in (("cpu", "CPU", C_CPU, 76), ("mem", "Memory", C_MEM, 100)):
+            cell = Gtk.CellRendererText(xalign=1.0, xpad=10)
+            col = Gtk.TreeViewColumn(title, cell, text=col_idx)
             col.set_min_width(width)
-            if idx == 1:
-                col.set_expand(True)
-            self.tree.append_column(col)
-        sw = Gtk.ScrolledWindow()
-        sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        sw.add(self.tree)
+            col.set_alignment(1.0)
+            self.add_column(key, col)
+        # don't move rows from under a finger
+        for event in ("button-press-event", "touch-event", "scroll-event"):
+            self.tree.connect(event, self.touch)
+        self.tree.get_selection().connect("changed", self.selection_changed)
+        sw = ui.scrolled(self.tree)
+        sw.connect("scroll-event", self.touch)
         outer.pack_start(sw, True, True, 0)
 
-        btns = Gtk.Box(spacing=8)
-        end = Gtk.Button(label="End task")
-        end.connect("clicked", lambda _b: self.kill(signal.SIGTERM))
-        force = Gtk.Button(label="Force quit")
-        force.get_style_context().add_class("destructive-action")
-        force.connect("clicked", lambda _b: self.kill(signal.SIGKILL))
-        self.pause_btn = Gtk.Button(label="Pause updates")
-        self.pause_btn.connect("clicked", self.toggle_pause)
-        btns.pack_start(end, False, False, 0)
-        btns.pack_start(force, False, False, 0)
-        btns.pack_end(self.pause_btn, False, False, 0)
-        outer.pack_start(btns, False, False, 0)
+        self.hint = ui.label("", "sub", wrap=True)
+        outer.pack_start(self.hint, False, False, 0)
+        bottom = ui.hbox(8)
+        self.end_btn = ui.button("End task", lambda: self.kill(signal.SIGTERM))
+        self.force_btn = ui.button("Force quit", lambda: self.kill(signal.SIGKILL), "danger")
+        bottom.pack_start(self.end_btn, False, False, 0)
+        bottom.pack_start(self.force_btn, False, False, 0)
+        self.clear_btn = ui.button("Deselect", lambda: self.tree.get_selection().unselect_all(), "flat")
+        bottom.pack_end(self.clear_btn, False, False, 0)
+        outer.pack_start(bottom, False, False, 0)
 
         self.refresh()
-        GLib.timeout_add_seconds(2, self.tick)
+        self.tree.get_selection().unselect_all()
+        self.selection_changed()
+        self.set_view("apps")
+        self.connect("map", lambda _w: GLib.idle_add(
+            lambda: (self.tree.get_selection().unselect_all(), False)[1]))
+        GLib.timeout_add(700, lambda: (self.refresh(), False)[1])
+        ui.every(self, 2, self.refresh)
 
-    @staticmethod
-    def fmt_cpu(_col, cell, model, it, idx):
-        cell.set_property("text", f"{model[it][idx]:.0f}%" if model[it][idx] >= 0.5 else "0%")
+    def add_column(self, key, col):
+        col.set_clickable(True)
+        col.connect("clicked", lambda _c: self.set_sort(key))
+        self.tree.append_column(col)
+        self.columns[key] = col
 
-    @staticmethod
-    def fmt_mem(_col, cell, model, it, idx):
-        cell.set_property("text", human(model[it][idx]))
+    def touch(self, *_a):
+        self.touched = time.monotonic()
+        return False
 
-    def visible(self, model, it, _data):
-        row = model[it]
-        if self.mine.get_active() and row[5] != ME:
-            return False
-        q = self.search.get_text().strip().lower()
-        return not q or q in row[1].lower() or q in row[6].lower() or q == str(row[0])
+    def held(self):
+        selected = self.tree.get_selection().get_selected()[1] is not None
+        return selected or time.monotonic() - self.touched < 4
 
-    def toggle_pause(self, _b):
-        self.paused = not self.paused
-        self.pause_btn.set_label("Resume updates" if self.paused else "Pause updates")
+    def selection_changed(self, *_a):
+        has = self.selected() is not None
+        for b in (self.end_btn, self.force_btn, self.clear_btn):
+            b.set_sensitive(has)
+        self.hint.set_text("The order stays put while something is selected." if has
+                           else "Tap a row to end it.")
 
-    def tick(self):
-        if not self.paused:
-            self.refresh()
-        return True
+    def set_sort(self, key):
+        self.sort = key
+        for k, col in self.columns.items():
+            col.set_sort_indicator(k == key)
+            col.set_sort_order(Gtk.SortType.ASCENDING if k == "name" else Gtk.SortType.DESCENDING)
+        self.render(True)
+
+    def set_view(self, view):
+        self.view = view
+        for key, b in self.tabs.items():
+            ui.set_class(b, "primary", key == view)
+        self.tree.get_selection().unselect_all()
+        self.build_items()
+        self.set_sort(self.sort)
 
     def refresh(self):
         procs = read_procs()
-        tot = total_jiffies()
-        dtot = max(tot - self.prev_total, 1)
-        # keep the selection across refreshes
-        sel_pid = None
-        model, it = self.tree.get_selection().get_selected()
-        if it:
-            sel_pid = model[it][0]
-        have = {}
-        for row in self.store:
-            have[row[0]] = row.iter
-        for pid, (comm, uid, rss, jiff, cmd) in procs.items():
-            # percent of ONE core, like top: 100% = one core fully busy
-            cpu = 0.0
-            if pid in self.prev:
-                cpu = max(jiff - self.prev[pid], 0) / dtot * NCPU * 100
-            vals = (pid, comm, username(uid), cpu, rss, uid, cmd or comm)
-            if pid in have:
-                self.store.set(have.pop(pid), *[x for kv in enumerate(vals) for x in kv])
-            else:
-                self.store.append(vals)
-        for it in have.values():
-            self.store.remove(it)
-        self.prev = {pid: v[3] for pid, v in procs.items()}
-        self.prev_total = tot
+        now = time.monotonic()
+        span = max(now - self.prev_at, 0.05)
+        for pid, p in procs.items():
+            before = self.prev.get(pid)
+            p["cpu"] = 0.0
+            if before and before[1] == p["started"]:
+                # percent of ONE core, like top: 100% = one core fully busy
+                p["cpu"] = max(p["jiffies"] - before[0], 0) / TICK / span * 100
+        self.prev = {pid: (p["jiffies"], p["started"]) for pid, p in procs.items()}
+        self.prev_at = now
+        self.procs = procs
+        self.build_items()
 
-        if sel_pid is not None:
-            for row in self.sorted:
-                if row[0] == sel_pid:
-                    self.tree.get_selection().select_iter(row.iter)
-                    break
-        m = meminfo()
-        used = m.get("MemTotal", 0) - m.get("MemAvailable", 0)
-        try:
-            load = " ".join(open("/proc/loadavg").read().split()[:3])
-        except OSError:
-            load = "?"
-        up = ""
-        try:
-            s = int(float(open("/proc/uptime").read().split()[0]))
-            up = f"   ·   up {s // 3600}h {s % 3600 // 60}m"
-        except OSError:
-            pass
-        self.summary.set_text(
-            f"{len(procs)} processes   ·   memory {human(used)} of {human(m.get('MemTotal', 0))}"
-            f"   ·   load {load}{up}")
+        mem = {}
+        for line in core.slurp("/proc/meminfo").splitlines():
+            key, _, value = line.partition(":")
+            if value.split():
+                mem[key] = int(value.split()[0])
+        used = mem.get("MemTotal", 0) - mem.get("MemAvailable", 0)
+        load = " ".join(core.slurp("/proc/loadavg").split()[:3])
+        self.summary.set_text(f"Memory {human(used)} of {human(mem.get('MemTotal', 0))}   ·   "
+                              f"load {load}   ·   {len(procs)} processes")
+
+    def app_of(self, proc):
+        return self.index.get(proc["name"].lower()) if proc["uid"] == ME else None
+
+    def build_items(self):
+        procs = self.procs
+        items = {}
+        if self.view == "all":
+            for pid, p in procs.items():
+                items[f"p{pid}"] = {
+                    "title": FRIENDLY.get(p["name"], p["name"]),
+                    "detail": f"{username(p['uid'])}  ·  {pid}  ·  {p['cmd'][:120]}",
+                    "icon": None, "cpu": p["cpu"], "mem": p["mem"], "members": [p],
+                    "search": f"{pid} {p['name']} {p['cmd']}",
+                }
+        else:
+            kids = {}
+            for pid, p in procs.items():
+                kids.setdefault(p["ppid"], []).append(pid)
+            for pid, p in procs.items():
+                app = self.app_of(p)
+                if not app:
+                    continue
+                parent = procs.get(p["ppid"])
+                if parent and self.app_of(parent) is app:
+                    continue    # a helper process of the same app
+                members, todo = [], [pid]
+                while todo:
+                    cur = todo.pop()
+                    other = self.app_of(procs[cur])
+                    if cur != pid and other and other is not app:
+                        continue        # an app started from this one is its own row
+                    members.append(procs[cur])
+                    todo += kids.get(cur, [])
+                inner = sorted({m["name"] for m in members[1:]
+                                if m["name"] != p["name"] and not m["name"].startswith(HELPERS)})
+                detail = "Running " + ", ".join(inner) if inner else app.get_description() or ""
+                items[f"a{pid}"] = {
+                    "title": app.get_display_name(), "detail": detail, "icon": app.get_icon(),
+                    "cpu": sum(m["cpu"] for m in members), "mem": sum(m["mem"] for m in members),
+                    "members": members,
+                    "search": " ".join([app.get_display_name()] + [m["name"] for m in members]),
+                }
+        self.items = items
+        self.render()
+
+    def render(self, force=False):
+        query = self.search.get_text().strip().lower()
+        shown = {k: v for k, v in self.items.items() if not query or query in v["search"].lower()}
+
+        def values(key):
+            item = shown[key]
+            title, detail = (GLib.markup_escape_text(item[x]) for x in ("title", "detail"))
+            markup = title + (f"\n<small><span alpha='65%'>{detail}</span></small>" if detail else "")
+            return [item["icon"], markup, f"{item['cpu']:.0f}%", human(item["mem"]), key]
+
+        rows = {}
+        for row in list(self.store):
+            key = row[C_KEY]
+            if key in shown:
+                new = values(key)
+                for idx in (C_NAME, C_CPU, C_MEM):
+                    if row[idx] != new[idx]:
+                        row[idx] = new[idx]
+                rows[key] = row.iter
+            else:
+                self.store.remove(row.iter)
+        for key in shown:
+            if key not in rows:
+                self.store.append(values(key))
+        if len(self.store) < 2 or (not force and self.held()):
+            return
+        sort_key = {"cpu": lambda i: (-i["cpu"], -i["mem"]), "mem": lambda i: (-i["mem"],),
+                    "name": lambda i: (i["title"].lower(),)}[self.sort]
+        order = [row[C_KEY] for row in self.store]
+        wanted = sorted(order, key=lambda k: sort_key(shown[k]))
+        if wanted != order:
+            where = {k: i for i, k in enumerate(order)}
+            self.store.reorder([where[k] for k in wanted])
+
+    def selected(self):
+        model, it = self.tree.get_selection().get_selected()
+        return self.items.get(model[it][C_KEY]) if it else None
 
     def kill(self, sig):
-        model, it = self.tree.get_selection().get_selected()
-        if not it:
+        item = self.selected()
+        if not item:
             return
-        pid, name, uid = model[it][0], model[it][1], model[it][5]
-        if pid in (1, os.getpid()):
+        members = list(item["members"])
+        if members[0]["pid"] in (1, os.getpid()):
+            ui.message(self, "That one can't be ended from here.")
             return
-        msg = ("Force quit" if sig == signal.SIGKILL else "End") + f" “{name}” (PID {pid})?"
-        if sig == signal.SIGKILL:
-            msg += "\nUnsaved work in it will be lost."
-        d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
-                              buttons=Gtk.ButtonsType.OK_CANCEL, text=msg)
-        ok = d.run() == Gtk.ResponseType.OK
-        d.destroy()
-        if not ok:
+        force = sig == signal.SIGKILL
+        if not ui.confirm(self, f"{'Force quit' if force else 'End'} {item['title']}?",
+                          "Unsaved work in it will be lost." if force else "It gets a chance to close cleanly.",
+                          "Force quit" if force else "End task", danger=force):
             return
-        try:
-            os.kill(pid, sig)
-        except PermissionError:
-            self.error(f"Not allowed to stop {name} (owned by {username(uid)}).")
-        except ProcessLookupError:
-            pass
-        GLib.timeout_add(400, lambda: (self.refresh(), False)[1])
-
-    def error(self, msg):
-        d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.ERROR,
-                              buttons=Gtk.ButtonsType.CLOSE, text=msg)
-        d.run()
-        d.destroy()
-
-
-def main():
-    from gi.repository import Gdk
-    prov = Gtk.CssProvider()
-    prov.load_from_data(CSS)
-    Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), prov,
-                                             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-    win = TaskManager()
-    win.connect("destroy", Gtk.main_quit)
-    win.show_all()
-    Gtk.main()
+        # a polite end goes to the main process; force quit takes the helpers too
+        for proc in members if force else members[:1]:
+            try:
+                with open(f"/proc/{proc['pid']}/stat", encoding="utf-8", errors="replace") as f:
+                    raw = f.read()
+                if raw[raw.rindex(")") + 2:].split()[19] != proc["started"]:
+                    continue        # that process ended and the number was reused
+                os.kill(proc["pid"], sig)
+            except PermissionError:
+                ui.message(self, f"Not allowed to stop {proc['name']}.",
+                           f"It belongs to {username(proc['uid'])}.")
+                break
+            except (OSError, ValueError):
+                pass
+        self.tree.get_selection().unselect_all()
+        GLib.timeout_add(500, lambda: (self.refresh(), False)[1])
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(ui.main("TaskManager", TaskManager, "termos-taskmgr"))

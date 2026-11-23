@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""termOS connect: ssh or mosh inside a terminal, with tmux resume and auto-reconnect.
+
+  termos-connect [--port N] [--] [user@]host
+
+Per-host options (mosh, tmux, reconnect) come from the SSH Hosts app.
+Reconnecting only happens after a connection that did work, so a wrong
+password or address is shown instead of being retried.
+"""
+import argparse
+import os
+import shlex
+import signal
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib", "termos"))
+from termosui import core, hosts  # noqa: E402
+
+TMUX = ('command -v tmux >/dev/null 2>&1 && exec tmux new-session -A -s termos; '
+        'echo "tmux is not installed on this machine, so the session will not be resumable."; '
+        'exec "${SHELL:-sh}" -l')
+ACCENT, DIM, RESET = "\033[1;34m", "\033[2m", "\033[0m"
+
+
+def say(text, colour=ACCENT):
+    print(f"{colour}{text}{RESET}", flush=True)
+
+
+def wait_for_enter(prompt):
+    try:
+        input(prompt)
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="termos-connect")
+    ap.add_argument("--port", default="")
+    ap.add_argument("target")
+    a = ap.parse_args()
+    if not hosts.TARGET_RE.fullmatch(a.target) or (a.port and not a.port.isdigit()):
+        wait_for_enter(f"'{a.target}' isn't a valid host. Press Enter to close.")
+        return 2
+
+    opts = hosts.options(a.target)
+    os.makedirs(hosts.CONN_DIR, 0o700, exist_ok=True)
+    state_file = os.path.join(hosts.CONN_DIR, str(os.getpid()))
+    marker = os.path.join(core.RUN_DIR, f"ssh-up-{os.getpid()}")
+
+    def set_state(state):
+        core.write_atomic(state_file, f"{state}\t{a.target}\n", 0o600)
+
+    def cleanup():
+        for path in (state_file, marker):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    def quit_now(*_a):
+        cleanup()
+        os._exit(1)
+
+    signal.signal(signal.SIGHUP, quit_now)
+    signal.signal(signal.SIGTERM, quit_now)
+
+    remote = [f"sh -c {shlex.quote(TMUX)}"] if opts["tmux"] else []
+    if opts["mosh"]:
+        cmd = ["mosh"] + ([f"--ssh=ssh -p {a.port}"] if a.port else []) + ["--", a.target]
+        if opts["tmux"]:
+            cmd += ["sh", "-c", TMUX]
+    else:
+        cmd = ["ssh", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3",
+               "-o", "ConnectTimeout=15", "-o", "PermitLocalCommand=yes",
+               # runs once the login has worked
+               "-o", f"LocalCommand=touch {shlex.quote(marker)}"]
+        if a.port:
+            cmd += ["-p", a.port]
+        if remote:
+            cmd.append("-t")
+        cmd += ["--", a.target] + remote
+
+    saved = next((h for h in hosts.ssh_hosts() if h["name"] == a.target), None)
+    on_piv = saved and hosts.key_choice(saved) == hosts.PIV
+    ever_up = False
+    tries = 0
+    try:
+        while True:
+            set_state("reconnecting" if ever_up else "connecting")
+            say(f"Connecting to {a.target}" + ("  (mosh)" if opts["mosh"] else ""))
+            if on_piv:
+                # gpg may still be holding the card
+                subprocess.run(["gpgconf", "--kill", "scdaemon"], stderr=subprocess.DEVNULL)
+            try:
+                child = subprocess.Popen(cmd)
+            except OSError as e:
+                say(f"Can't start {cmd[0]}: {e}")
+                break
+            up = False
+            started = time.monotonic()
+            while True:
+                try:
+                    code = child.wait(timeout=1)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                except KeyboardInterrupt:
+                    continue        # Ctrl+C belongs to ssh
+                if not up and (os.path.exists(marker) if not opts["mosh"]
+                               else time.monotonic() - started > 8):
+                    up = ever_up = True
+                    tries = 0
+                    set_state("connected")
+                    hosts.set_meta(a.target, used=time.time())
+            if os.path.exists(marker):
+                os.unlink(marker)
+                if not up:
+                    up = ever_up = True     # connected and finished within a second
+                    tries = 0
+                    hosts.set_meta(a.target, used=time.time())
+            if code == 0:
+                return 0
+            # ssh exits 255 when the connection itself failed
+            if opts["mosh"] or code != 255 or not ever_up or not opts["reconnect"]:
+                break
+            tries += 1
+            delay = min(2 ** tries, 15)
+            set_state("reconnecting")
+            print("\033[?1049l\033[?1000l\033[?1002l\033[?1006l\033[?25h", end="")
+            subprocess.run(["stty", "sane"], stderr=subprocess.DEVNULL)
+            say(f"Connection lost. Reconnecting in {delay} s (Ctrl+C to stop).")
+            time.sleep(delay)
+    except KeyboardInterrupt:
+        print()
+    finally:
+        cleanup()
+    say("Connection closed.", DIM)
+    wait_for_enter("Press Enter to close. ")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

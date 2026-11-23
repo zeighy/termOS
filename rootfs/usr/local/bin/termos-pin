@@ -1,0 +1,208 @@
+#!/usr/bin/python3 -I
+"""termOS lock-screen secrets: the only code that can read the PIN or check the password.
+
+Runs as root through a password-less sudo rule limited to this script, so:
+  * secrets arrive on stdin, never in arguments (arguments are visible in /proc);
+  * it only ever acts on the user who called sudo;
+  * every attempt is counted on disk BEFORE it is checked, under a file lock, so
+    killing the helper, running it in parallel or rebooting doesn't buy more guesses;
+  * it uses only the standard library, in Python's isolated mode.
+
+  termos-pin status            {"set": ..., "pin_wait": s, "pin_blocked": ..., "password_wait": s}
+  termos-pin verify-pin        stdin: PIN
+  termos-pin verify-password   stdin: account password
+  termos-pin set               stdin: "pin"|"password", that secret, the new PIN (one per line)
+  termos-pin init USER         root only (installer); stdin: new PIN
+  termos-pin check             anyone; stdin: PIN - is it an acceptable new PIN?
+
+Exit status: 0 ok, 1 wrong secret, 2 bad request, 3 wait before trying again.
+"""
+import ctypes
+import fcntl
+import hashlib
+import hmac
+import json
+import os
+import pwd
+import sys
+import time
+
+STATE_DIR = "/var/lib/termos/lock"
+MAX_PIN_FAILS = 10                                      # after this only the password unlocks
+PIN_DELAYS = {5: 30, 6: 60, 7: 120, 8: 300, 9: 600}     # failures so far -> seconds to wait
+PASSWORD_DELAYS = {5: 30, 6: 60, 7: 120}                # later failures wait 300 s; never blocked
+OK, WRONG, BAD, WAIT = 0, 1, 2, 3
+
+
+def reply(code, **info):
+    print(json.dumps(info))
+    sys.exit(code)
+
+
+def read_line():
+    line = sys.stdin.buffer.readline(1024)
+    return line[:-1] if line.endswith(b"\n") else line
+
+
+def pin_problem(pin):
+    if not pin.isdigit():
+        return "Use digits only."
+    if not 4 <= len(pin) <= 10:
+        return "Use 4 to 10 digits."
+    if len(set(pin)) == 1:
+        return "Don't use one digit repeated."
+    text = pin.decode()
+    if text in "01234567890" or text in "09876543210":
+        return "Don't use a simple sequence."
+    return None
+
+
+def hash_pin(pin, salt):
+    return hashlib.scrypt(pin, salt=salt, n=2 ** 14, r=8, p=1, maxmem=64 * 1024 * 1024, dklen=32)
+
+
+def password_matches(user, password):
+    stored = None
+    with open("/etc/shadow", "rb") as f:
+        for line in f:
+            fields = line.rstrip(b"\n").split(b":")
+            if fields[0] == user.encode():
+                stored = fields[1]
+                break
+    # empty, locked ("!...") and disabled ("*") passwords never unlock
+    if not stored or stored[:1] in (b"!", b"*") or not password or b"\0" in password:
+        return False
+    crypt = ctypes.CDLL("libcrypt.so.2").crypt
+    crypt.restype = ctypes.c_char_p
+    crypt.argtypes = (ctypes.c_char_p, ctypes.c_char_p)
+    result = crypt(password, stored)
+    return bool(result) and hmac.compare_digest(result, stored)
+
+
+class Store:
+    """One user's PIN and attempt counters, locked for the life of the process."""
+
+    def __init__(self, uid):
+        os.makedirs(STATE_DIR, 0o700, exist_ok=True)
+        os.chmod(STATE_DIR, 0o700)
+        self.path = os.path.join(STATE_DIR, f"{uid}.json")
+        self.lock = os.open(self.path + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(self.lock, fcntl.LOCK_EX)
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                self.data = json.load(f)
+            self.corrupt = not isinstance(self.data, dict)
+        except FileNotFoundError:
+            self.data, self.corrupt = {}, False
+        except ValueError:
+            self.corrupt = True
+        if self.corrupt:
+            self.data = {}      # no PIN: only the account password gets in
+
+    def save(self):
+        tmp = self.path + ".new"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(self.data, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self.path)
+        dirfd = os.open(STATE_DIR, os.O_RDONLY)
+        os.fsync(dirfd)
+        os.close(dirfd)
+
+    def wait(self, kind):
+        until, delay = self.data.get(f"{kind}_until", 0), self.data.get(f"{kind}_delay", 0)
+        # capped at the delay itself, so a clock that jumped back can't lock you out for years
+        return max(0, min(int(until - time.time() + 0.999), delay))
+
+    def blocked(self):
+        return self.data.get("pin_fails", 0) >= MAX_PIN_FAILS
+
+    def status(self):
+        return {"set": bool(self.data.get("hash")), "pin_blocked": self.blocked(),
+                "pin_wait": self.wait("pin"), "password_wait": self.wait("password")}
+
+    def set_pin(self, pin):
+        salt = os.urandom(16)
+        self.data = {"salt": salt.hex(), "hash": hash_pin(pin, salt).hex()}
+        self.save()
+
+    def verify(self, kind, user, secret):
+        if kind == "pin" and (not self.data.get("hash") or self.blocked()):
+            return BAD
+        if self.wait(kind):
+            return WAIT
+        fails = self.data.get(f"{kind}_fails", 0) + 1
+        delays = PIN_DELAYS if kind == "pin" else PASSWORD_DELAYS
+        delay = delays.get(fails, 300 if kind == "password" and fails > max(delays) else 0)
+        self.data.update({f"{kind}_fails": fails, f"{kind}_delay": delay,
+                          f"{kind}_until": time.time() + delay})
+        self.save()
+        if kind == "pin":
+            good = hmac.compare_digest(hash_pin(secret, bytes.fromhex(self.data["salt"])),
+                                       bytes.fromhex(self.data["hash"]))
+        else:
+            good = password_matches(user, secret)
+        if not good:
+            return WRONG
+        # the password clears a blocked PIN; the PIN doesn't clear password throttling
+        for k in ("pin", "password") if kind == "password" else ("pin",):
+            for field in ("fails", "delay", "until"):
+                self.data.pop(f"{k}_{field}", None)
+        self.save()
+        return OK
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "check":
+        problem = pin_problem(read_line())
+        reply(BAD if problem else OK, error=problem)
+    if os.geteuid() != 0:
+        reply(BAD, error="must run through sudo")
+    caller = int(os.environ.get("SUDO_UID", "0"))
+    try:
+        if cmd == "init" and caller == 0 and len(sys.argv) == 3:
+            who = pwd.getpwnam(sys.argv[2])
+        elif cmd in ("status", "verify-pin", "verify-password", "set") and caller != 0 and len(sys.argv) == 2:
+            who = pwd.getpwuid(caller)
+        else:
+            reply(BAD, error="bad request")
+    except KeyError:
+        reply(BAD, error="no such user")
+
+    # everything is read before the lock is taken, so a caller that never
+    # finishes writing can't hang the lock screen
+    lines = [] if cmd == "status" else [read_line() for _ in range(3 if cmd == "set" else 1)]
+    store = Store(who.pw_uid)
+    if cmd == "status":
+        reply(OK, **store.status())
+    if cmd == "init":
+        pin = lines[0]
+        problem = pin_problem(pin)
+        if problem:
+            reply(BAD, error=problem)
+        store.set_pin(pin)
+        reply(OK, **store.status())
+    if cmd.startswith("verify-"):
+        code = store.verify(cmd[len("verify-"):], who.pw_name, lines[0])
+        reply(code, **store.status())
+
+    # set: always needs the current PIN or the account password
+    kind = lines[0].decode(errors="replace")
+    secret, new = lines[1], lines[2]
+    if kind not in ("pin", "password"):
+        reply(BAD, error="bad request")
+    problem = pin_problem(new)
+    if problem:
+        reply(BAD, error=problem)
+    code = store.verify(kind, who.pw_name, secret)
+    if code != OK:
+        reply(code, **store.status())
+    store.set_pin(new)
+    reply(OK, **store.status())
+
+
+if __name__ == "__main__":
+    main()

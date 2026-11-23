@@ -2,6 +2,6 @@
 Type=Application
 Name=Update termOS
 Comment=Update termOS and all apps
-Exec=foot -T "termOS update" -e termos-update
+Exec=termos-updater
 Icon=system-software-update
 Categories=System;

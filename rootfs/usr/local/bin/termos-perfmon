@@ -3,32 +3,25 @@
 import glob
 import os
 import re
+import sys
 from collections import deque
 
-import gi
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib", "termos"))
+from termosui import core, palette, ui  # noqa: E402
 
-gi.require_version("Gtk", "3.0")
-gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+from gi.repository import GLib, Gtk  # noqa: E402
 
 HISTORY = 60  # seconds shown
-CSS = b"""
-window, .background { font-size: 15px; }
-.card-title { font-size: 13px; font-weight: bold; opacity: 0.65; }
-.card-value { font-size: 26px; font-weight: bold; }
-.card-sub { font-size: 12px; opacity: 0.7; }
-stacksidebar row { padding: 16px 20px; font-size: 16px; }
+COLORS = {"cpu": palette.rgb("accent"), "mem": palette.rgb("green"), "disk": palette.rgb("orange"),
+          "net": palette.rgb("mauve"), "bat": palette.rgb("yellow")}
+CSS = """
+.overview button.metric {{ background-color: {card}; border-radius: 16px; padding: 12px 14px; }}
+.overview button.metric:hover {{ background-color: {raised}; }}
+.overview flowboxchild {{ padding: 0; }}
+.metric-value {{ font-size: 24px; font-weight: bold; color: {bright}; }}
+.detail-value {{ font-size: 26px; font-weight: bold; color: {bright}; }}
 """
-COLORS = {"cpu": (0.54, 0.71, 0.98), "mem": (0.65, 0.89, 0.63), "disk": (0.98, 0.70, 0.53),
-          "net": (0.80, 0.65, 0.97), "bat": (0.98, 0.89, 0.69), "temp": (0.95, 0.55, 0.66)}
-
-
-def slurp(path, default=""):
-    try:
-        with open(path) as f:
-            return f.read().strip()
-    except OSError:
-        return default
+slurp = core.slurp
 
 
 def rate(b):
@@ -45,12 +38,14 @@ def size(kb):
 class Graph(Gtk.DrawingArea):
     """Scrolling line graph. fixed_max=None autoscales (for throughput)."""
 
-    def __init__(self, color, fixed_max=100.0, series=1):
+    def __init__(self, color, fixed_max=100.0, series=1, height=170, data=None):
         super().__init__()
         self.color = color
         self.fixed_max = fixed_max
-        self.data = [deque([0.0] * HISTORY, maxlen=HISTORY) for _ in range(series)]
-        self.set_size_request(-1, 140)
+        # the overview and the detail page draw the same history
+        self.data = data or [deque([0.0] * HISTORY, maxlen=HISTORY) for _ in range(series)]
+        self.mirrors = []
+        self.set_size_request(-1, height)
         self.set_hexpand(True)
         self.connect("draw", self.on_draw)
 
@@ -58,6 +53,8 @@ class Graph(Gtk.DrawingArea):
         for d, v in zip(self.data, vals):
             d.append(v)
         self.queue_draw()
+        for other in self.mirrors:
+            other.queue_draw()
 
     def on_draw(self, _w, cr):
         w, h = self.get_allocated_width(), self.get_allocated_height()
@@ -127,107 +124,116 @@ class Cores(Gtk.DrawingArea):
         return False
 
 
-def card(title):
-    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-    box.set_border_width(16)
-    t = Gtk.Label(label=title, xalign=0)
-    t.get_style_context().add_class("card-title")
-    box.pack_start(t, False, False, 0)
-    return box
+class Metric:
+    """An overview card and the detail page behind it."""
+
+    def __init__(self, win, key, icon, title, fixed_max=100.0, series=1, note=None):
+        self.value = ui.label("–", "detail-value", wrap=True)
+        self.sub = ui.label("", "sub", wrap=True)
+        self.graph = Graph(COLORS[key], fixed_max, series)
+
+        self.page = ui.Page(820)
+        head = ui.hbox(8)
+        head.pack_start(ui.button(None, win.show_overview, "flat", "round", icon_name="back", tip="Back"),
+                        False, False, 0)
+        head.pack_start(ui.label(title, "title"), True, True, 0)
+        self.page.box.pack_start(head, False, False, 0)
+        self.page.section()
+        for w in (self.value, self.graph, self.sub):
+            self.page.add(w)
+        if note:
+            self.page.note(note)
+        win.stack.add_named(self.page.widget, key)
+
+        self.small_value = ui.label("–", "metric-value", ellipsize=True)
+        small = Graph(COLORS[key], fixed_max, series, 62, self.graph.data)
+        self.graph.mirrors.append(small)
+        button = ui.classes(Gtk.Button(), "metric")
+        box = ui.vbox(6)
+        line = ui.hbox(8)
+        line.pack_start(ui.icon(icon), False, False, 0)
+        line.pack_start(ui.label(title, "heading"), True, True, 0)
+        line.pack_end(ui.icon("right", "sub"), False, False, 0)
+        for w in (line, self.small_value, small):
+            box.pack_start(w, False, False, 0)
+        button.add(box)
+        button.set_size_request(250, -1)
+        button.get_accessible().set_name(title)
+        button.connect("clicked", lambda _b: win.stack.set_visible_child_name(key))
+        child = Gtk.FlowBoxChild()
+        child.set_can_focus(False)
+        child.add(button)
+        win.flow.add(child)
+
+    def set_value(self, text, short=None):
+        self.value.set_text(text)
+        self.small_value.set_text(short or text)
 
 
-def value_label(css="card-value"):
-    lab = Gtk.Label(xalign=0)
-    lab.get_style_context().add_class(css)
-    return lab
-
-
-class PerfMon(Gtk.Window):
+class PerfMon(Gtk.ApplicationWindow):
     def __init__(self):
         super().__init__(title="Performance Monitor")
+        ui.css(CSS)
         self.set_default_size(900, 640)
+        self.set_icon_name("org.gnome.SystemMonitor")
         self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
-        side = Gtk.StackSidebar(stack=self.stack)
-        side.set_size_request(190, -1)
-        root = Gtk.Box()
-        root.pack_start(side, False, False, 0)
-        root.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), False, False, 0)
-        root.pack_start(self.stack, True, True, 0)
-        self.add(root)
+        self.stack.set_hhomogeneous(False)
+        self.add(self.stack)
+
+        overview = ui.vbox(12, "overview")
+        overview.set_border_width(16)
+        overview.pack_start(ui.label("Performance", "title"), False, False, 0)
+        self.flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
+                                column_spacing=10, row_spacing=10)
+        self.flow.set_max_children_per_line(3)
+        overview.pack_start(self.flow, False, False, 0)
+        self.footer = ui.label("", "sub", wrap=True)
+        overview.pack_start(self.footer, False, False, 4)
+        self.stack.add_named(ui.scrolled(ui.Clamp(overview, 1120)), "overview")
 
         self.ncpu = os.cpu_count() or 1
         self.prev_cpu = None
         self.prev_disk = None
         self.prev_net = None
-        self.cpu_model = re.sub(r"\s+", " ", (re.search(r"model name\s*:\s*(.*)", slurp("/proc/cpuinfo")) or
-                                              [0, "CPU"])[1])
-        self.build_cpu()
-        self.build_mem()
-        self.build_disk()
-        self.build_net()
-        self.bat = next(iter(glob.glob("/sys/class/power_supply/BAT*")), None)
+        model = re.search(r"model name\s*:\s*(.*)", slurp("/proc/cpuinfo"))
+        self.cpu_model = re.sub(r"\s+", " ", model.group(1)) if model else "CPU"
+        self.footer.set_text(self.cpu_model)
+
+        self.cpu = Metric(self, "cpu", "cpu", "CPU")
+        self.cores = Cores(self.ncpu)
+        self.cpu.page.section("Each core")
+        self.cpu.page.add(self.cores)
+        self.cpu.page.note(self.cpu_model)
+
+        self.mem = Metric(self, "mem", "memory", "Memory")
+        self.mem.page.section("Swap (compressed in RAM)")
+        self.swap_graph = Graph(COLORS["mem"], height=120)
+        self.swap_val = ui.label("", "sub", wrap=True)
+        self.mem.page.add(self.swap_graph)
+        self.mem.page.add(self.swap_val)
+
+        self.disk = Metric(self, "disk", "disk", "Disk", None, 2, "The lighter line is writes.")
+        self.net = Metric(self, "net", "swap", "Network", None, 2, "The lighter line is upload.")
+        info = core.battery()
+        self.bat = info["path"] if info else None
         if self.bat:
-            self.build_battery()
+            self.battery = Metric(self, "bat", "battery", "Battery")
+
         self.last = GLib.get_monotonic_time()
         self.tick()
-        GLib.timeout_add(1000, self.tick)
+        # rates need two samples, so take the second one quickly
+        GLib.timeout_add(400, lambda: (self.tick(), False)[1])
+        ui.every(self, 1, self.tick)
+        self.connect("key-press-event", self.key)
 
-    def add_page(self, name, title, box):
-        sw = Gtk.ScrolledWindow()
-        sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        sw.add(box)
-        self.stack.add_titled(sw, name, title)
+    def show_overview(self):
+        self.stack.set_visible_child_name("overview")
 
-    # ---- pages -----------------------------------------------------------
-    def build_cpu(self):
-        b = card(f"CPU   {self.cpu_model}")
-        self.cpu_val = value_label()
-        self.cpu_sub = value_label("card-sub")
-        self.cpu_graph = Graph(COLORS["cpu"])
-        self.cores = Cores(self.ncpu)
-        for w in (self.cpu_val, self.cpu_graph, self.cpu_sub, self.cores):
-            b.pack_start(w, False, False, 4)
-        self.add_page("cpu", "CPU", b)
-
-    def build_mem(self):
-        b = card("Memory")
-        self.mem_val = value_label()
-        self.mem_sub = value_label("card-sub")
-        self.mem_graph = Graph(COLORS["mem"])
-        self.swap_title = Gtk.Label(label="Swap / zram", xalign=0)
-        self.swap_title.get_style_context().add_class("card-title")
-        self.swap_val = value_label("card-sub")
-        self.swap_graph = Graph(COLORS["mem"])
-        for w in (self.mem_val, self.mem_graph, self.mem_sub, self.swap_title, self.swap_graph, self.swap_val):
-            b.pack_start(w, False, False, 4)
-        self.add_page("mem", "Memory", b)
-
-    def build_disk(self):
-        b = card("Disk")
-        self.disk_val = value_label()
-        self.disk_sub = value_label("card-sub")
-        self.disk_graph = Graph(COLORS["disk"], None, 2)
-        for w in (self.disk_val, self.disk_graph, self.disk_sub):
-            b.pack_start(w, False, False, 4)
-        self.add_page("disk", "Disk", b)
-
-    def build_net(self):
-        b = card("Network")
-        self.net_val = value_label()
-        self.net_sub = value_label("card-sub")
-        self.net_graph = Graph(COLORS["net"], None, 2)
-        for w in (self.net_val, self.net_graph, self.net_sub):
-            b.pack_start(w, False, False, 4)
-        self.add_page("net", "Network", b)
-
-    def build_battery(self):
-        b = card("Battery")
-        self.bat_val = value_label()
-        self.bat_sub = value_label("card-sub")
-        self.bat_graph = Graph(COLORS["bat"])
-        for w in (self.bat_val, self.bat_graph, self.bat_sub):
-            b.pack_start(w, False, False, 4)
-        self.add_page("bat", "Battery", b)
+    def key(self, _w, event):
+        if event.keyval == 0xff1b:      # Esc
+            self.show_overview()
+            return True
+        return False
 
     # ---- sampling --------------------------------------------------------
     def tick(self):
@@ -255,8 +261,8 @@ class PerfMon(Gtk.Window):
                 dt_ = max(t - pt, 1)
                 pct.append(100.0 * (1 - (i - pi) / dt_))
             total, per = pct[0], pct[1:]
-            self.cpu_graph.push(total)
-            self.cpu_val.set_text(f"{total:.0f}%")
+            self.cpu.graph.push(total)
+            self.cpu.set_value(f"{total:.0f}%")
             if len(per) == self.ncpu:
                 self.cores.vals = per
                 self.cores.queue_draw()
@@ -272,7 +278,7 @@ class PerfMon(Gtk.Window):
             temp = self.temperature()
             if temp:
                 parts.append(f"{temp:.0f} °C")
-            self.cpu_sub.set_text("   ·   ".join(parts) + f"   ·   {self.ncpu} threads")
+            self.cpu.sub.set_text("   ·   ".join(parts) + f"   ·   {self.ncpu} threads")
         self.prev_cpu = cur
 
     @staticmethod
@@ -292,9 +298,10 @@ class PerfMon(Gtk.Window):
             m[k] = int(v.split()[0]) if v.split() else 0
         tot = m.get("MemTotal", 1)
         used = tot - m.get("MemAvailable", 0)
-        self.mem_graph.push(100.0 * used / tot)
-        self.mem_val.set_text(f"{100.0 * used / tot:.0f}%")
-        self.mem_sub.set_text(f"{size(used)} used of {size(tot)}   ·   cached {size(m.get('Cached', 0))}"
+        self.mem.graph.push(100.0 * used / tot)
+        self.mem.set_value(f"{100.0 * used / tot:.0f}%",
+                           f"{100.0 * used / tot:.0f}%  ·  {size(used)}")
+        self.mem.sub.set_text(f"{size(used)} used of {size(tot)}   ·   cached {size(m.get('Cached', 0))}"
                               f"   ·   available {size(m.get('MemAvailable', 0))}")
         st, sf = m.get("SwapTotal", 0), m.get("SwapFree", 0)
         if st:
@@ -313,13 +320,12 @@ class PerfMon(Gtk.Window):
                 wr += int(f[9]) * 512
         if self.prev_disk:
             r, w = (rd - self.prev_disk[0]) / dt, (wr - self.prev_disk[1]) / dt
-            self.disk_graph.push(r, w)
-            self.disk_val.set_text(f"read {rate(r)}   write {rate(w)}")
+            self.disk.graph.push(r, w)
+            self.disk.set_value(f"read {rate(r)}   write {rate(w)}", rate(r + w))
             st = os.statvfs("/")
             tot = st.f_blocks * st.f_frsize
             free = st.f_bavail * st.f_frsize
-            self.disk_sub.set_text(f"/ : {(tot - free) / 1e9:.1f} GB used of {tot / 1e9:.1f} GB"
-                                   "   ·   lighter line = writes")
+            self.disk.sub.set_text(f"{(tot - free) / 1e9:.1f} GB used of {tot / 1e9:.1f} GB")
         self.prev_disk = (rd, wr)
 
     def sample_net(self, dt):
@@ -333,20 +339,19 @@ class PerfMon(Gtk.Window):
             tx += int(f[8])
         if self.prev_net:
             d, u = max(rx - self.prev_net[0], 0) / dt, max(tx - self.prev_net[1], 0) / dt
-            self.net_graph.push(d, u)
-            self.net_val.set_text(f"↓ {rate(d)}   ↑ {rate(u)}")
-            self.net_sub.set_text(f"received {rx / 1e6:.0f} MB   ·   sent {tx / 1e6:.0f} MB since boot"
-                                  "   ·   lighter line = upload")
+            self.net.graph.push(d, u)
+            self.net.set_value(f"↓ {rate(d)}   ↑ {rate(u)}", f"↓ {rate(d)}")
+            self.net.sub.set_text(f"received {rx / 1e6:.0f} MB   ·   sent {tx / 1e6:.0f} MB since boot")
         self.prev_net = (rx, tx)
 
     def sample_bat(self):
         cap = slurp(f"{self.bat}/capacity", "0")
         status = slurp(f"{self.bat}/status", "?")
         try:
-            self.bat_graph.push(float(cap))
+            self.battery.graph.push(float(cap))
         except ValueError:
             return
-        self.bat_val.set_text(f"{cap}%   {status}")
+        self.battery.set_value(f"{cap}%   {status}", f"{cap}%")
         parts = []
         pw = slurp(f"{self.bat}/power_now")
         if pw.isdigit():
@@ -357,19 +362,8 @@ class PerfMon(Gtk.Window):
         m = re.search(r"^ACTIVE=(\S+)", slurp("/etc/termos/power.conf"), re.M)
         if m:
             parts.append(f"power mode: {m.group(1)}")
-        self.bat_sub.set_text("   ·   ".join(p for p in parts if p))
-
-
-def main():
-    prov = Gtk.CssProvider()
-    prov.load_from_data(CSS)
-    Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), prov,
-                                             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-    win = PerfMon()
-    win.connect("destroy", Gtk.main_quit)
-    win.show_all()
-    Gtk.main()
+        self.battery.sub.set_text("   ·   ".join(p for p in parts if p))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(ui.main("Performance", PerfMon, "termos-perfmon"))
