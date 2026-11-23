@@ -377,17 +377,40 @@ check_packages || die "cannot install from here. Nothing was erased."
 say "Partitioning $DISK"
 umount -R "$MNT" 2>/dev/null || true
 swapoff -a 2>/dev/null || true
+# anything else still using the disk (a mounted partition, swap) would stop the
+# kernel from reading the new partition table
+while read -r part; do
+    umount -A -q "$part" 2>/dev/null || true
+    swapoff "$part" 2>/dev/null || true
+done < <(lsblk -lnpo NAME "$DISK" | tail -n +2)
 # partition IDs about to be erased, to tidy the firmware's boot menu afterwards
 mapfile -t OLD_PARTS < <(lsblk -nro PARTUUID "$DISK" | grep -Ex '[0-9A-Fa-f-]{36}' || true)
 wipefs -af "$DISK" >/dev/null
+udevadm settle --timeout=10 || true
 sgdisk --zap-all "$DISK" >/dev/null
 sgdisk -n1:0:+512M -t1:ef00 -c1:EFI \
        -n2:0:0     -t2:8304 -c2:termOS "$DISK" >/dev/null
-partprobe "$DISK" 2>/dev/null || true
-udevadm settle
-p=""; [[ $DISK =~ [0-9]$ ]] && p="p"     # mmcblk0p1 / nvme0n1p1 vs sda1
-ESP="${DISK}${p}1"; ROOT="${DISK}${p}2"
-for _ in $(seq 20); do [[ -b $ROOT ]] && break; sleep 0.25; done
+# Wait until the kernel shows both new partitions. udev may still be looking at the
+# disk when sgdisk asks for a re-read (it then fails as "busy"), and slow eMMC can
+# take a while: ask again until they're there.
+ESP="" ROOT="" reread=""
+for _ in $(seq 30); do
+    udevadm settle --timeout=5 || true
+    mapfile -t parts < <(lsblk -lnpo NAME,TYPE "$DISK" | awk '$2 == "part" { print $1 }')
+    if (( ${#parts[@]} == 2 )) && [[ -b ${parts[0]} && -b ${parts[1]} ]]; then
+        ESP=${parts[0]} ROOT=${parts[1]}
+        break
+    fi
+    reread=$( { partprobe "$DISK" || partx -u "$DISK" || blockdev --rereadpt "$DISK"; } 2>&1 ) || true
+    sleep 1
+done
+if [[ -z $ROOT ]]; then
+    # what a photo of the screen needs to show to find the cause
+    lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS "$DISK"
+    [[ -n $reread ]] && echo "$reread" | tail -n 3
+    dmesg 2>/dev/null | grep -iE "mmc|nvme|sd[a-z]|partition|I/O error" | tail -n 5
+    die "the new partitions on $DISK did not show up. Restart the tablet with the USB in, and run the installer again."
+fi
 
 say "Formatting"
 mkfs.fat -F32 -n EFI "$ESP" >/dev/null
