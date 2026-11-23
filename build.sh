@@ -1,6 +1,7 @@
 #!/bin/bash
 # Build the termOS installer ISO inside an Arch Linux docker container.
-# Output: ./out/termos-YYYY.MM.DD-x86_64.iso
+#   ./build.sh            -> out/termos-YYYY.MM.DD-x86_64.iso         (~2.4 GB, installs offline)
+#   ./build.sh --online   -> out/termos-online-YYYY.MM.DD-x86_64.iso  (~1 GB, downloads the packages)
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 
@@ -11,6 +12,13 @@ if ! docker info >/dev/null 2>&1; then
     fi
     echo "Cannot talk to docker (are you in the docker group?)" >&2; exit 1
 fi
+
+FLAVOR=full
+case "${1:-}" in
+    "") ;;
+    --online) FLAVOR=online ;;
+    *) echo "usage: $0 [--online]" >&2; exit 1 ;;
+esac
 
 mkdir -p out .work
 # "-test" marks a build of code that isn't on GitHub's main yet: termos-update would
@@ -27,5 +35,6 @@ docker run --rm --privileged \
     -v "$PWD/out":/out \
     -v "$PWD/.work":/work \
     -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" -e TERMOS_VERSION="$TERMOS_VERSION" \
+    -e TERMOS_FLAVOR="$FLAVOR" \
     archlinux:latest bash /src/build/container-build.sh
 rmdir .work 2>/dev/null || true

@@ -26,8 +26,10 @@ ask()  { local p=$1 d=${2:-} a; read -rp "$p${d:+ [$d]}: " a; printf '%s' "${a:-
 [[ $EUID -eq 0 ]] || die "run as root"
 [[ -d /sys/firmware/efi ]] || die "not booted in UEFI mode. Enable UEFI boot (disable CSM/Legacy) in the firmware setup."
 [[ -f $PKGLIST ]] || die "$PKGLIST missing - is this the termOS live USB?"
+# the online USB (./build.sh --online) carries no packages: always download them
 if [[ $ONLINE -eq 0 && ! -f $REPO/termos.db ]]; then
-    die "offline package repo missing; use --online"
+    ONLINE=1
+    echo "This USB has no packages on it, so termOS is installed from the internet."
 fi
 FW_BITS=$(cat /sys/firmware/efi/fw_platform_size 2>/dev/null || true)
 LOADER='\EFI\systemd\systemd-bootx64.efi'

@@ -9,17 +9,25 @@ size() {
 wt() { size; whiptail --backtitle "$TITLE" "$@" 3>&1 1>&2 2>&3; }
 pause() { echo; read -rp "Press Enter to return to the menu. " _; }
 
-choice=install
+# the online USB (./build.sh --online) carries no packages
+if [ -f /opt/termos/repo/termos.db ]; then
+    install_items=(install "Install termOS (from this USB, no internet needed)"
+                   online  "Install with the newest packages (needs internet)")
+    hello="Welcome."
+else
+    install_items=(online "Install termOS (downloads it: needs internet)")
+    hello="Welcome. This USB installs termOS from the internet: connect to Wi-Fi first."
+fi
+choice=${install_items[0]}
 while :; do
     if net=$(termos-wifi --status 2>/dev/null); then wifi="Wi-Fi: connected to $net"; else wifi="Wi-Fi: not connected"; fi
     size
     choice=$(wt --title "termOS" --default-item "$choice" --menu \
-"Welcome. Sideways or upside down? Pick \"Turn the screen\" until it's upright.
+"$hello Sideways or upside down? Pick \"Turn the screen\" until it's upright.
 
 $wifi" "$H" "$W" 8 \
         rotate  "Turn the screen" \
-        install "Install termOS (from this USB, no internet needed)" \
-        online  "Install with the newest packages (needs internet)" \
+        "${install_items[@]}" \
         wifi    "Connect to Wi-Fi" \
         shell   "Open a terminal (type termos-menu to come back)" \
         off     "Power off" \
