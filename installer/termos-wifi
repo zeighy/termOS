@@ -1,0 +1,115 @@
+#!/bin/bash
+# termOS live USB: connect to Wi-Fi with menus (iwd underneath).
+#   termos-wifi           pick a network and connect
+#   termos-wifi --status  print the connected network, if any
+# The network joined is remembered in /run/termos/wifi for the installer, which
+# sets it up on the installed system too.
+STATE=/run/termos/wifi
+TITLE="termOS - Wi-Fi"
+
+strip() { sed 's/\x1b\[[0-9;]*m//g'; }
+size() {
+    read -r H W < <(stty size 2>/dev/null || echo "24 80")
+    H=$(( H > 30 ? 30 : H - 2 )); W=$(( W > 76 ? 76 : W - 4 ))
+}
+wt() { size; whiptail --backtitle "$TITLE" "$@" 3>&1 1>&2 2>&3; }
+note() { wt --title "Wi-Fi" --msgbox "$1" 12 "$W"; }
+
+# The first device iwd runs as a Wi-Fi client. Radios can start blocked (rfkill)
+# or powered off, so switch them on first and give iwd a moment.
+find_device() {
+    local d try
+    rfkill unblock wifi 2>/dev/null
+    systemctl start iwd.service 2>/dev/null
+    for try in $(seq 20); do
+        for d in $(iwctl device list 2>/dev/null | strip | awk '/^-+ *$/ { n++; next } n >= 2 && NF { print $1 }'); do
+            [ -e "/sys/class/net/$d/wireless" ] && iwctl device "$d" set-property Powered on &>/dev/null
+        done
+        d=$(iwctl station list 2>/dev/null | strip | awk '/^-+ *$/ { n++; next } n >= 2 && NF { print $1; exit }')
+        if [ -n "$d" ] && [ -e "/sys/class/net/$d/wireless" ]; then echo "$d"; return 0; fi
+        (( try == 1 )) && wt --title "Wi-Fi" --infobox "Switching Wi-Fi on..." 7 "$W" >&2
+        sleep 1
+    done
+    return 1
+}
+connected_to() {   # the network name, if connected
+    iwctl station "$1" show 2>/dev/null | strip | sed -n 's/^ *Connected network *\(.*[^ ]\) *$/\1/p'
+}
+networks() {       # "security<TAB>name" per network, strongest first
+    iwctl station "$1" scan &>/dev/null
+    sleep 4
+    iwctl station "$1" get-networks 2>/dev/null | strip | awk '
+        function trim(x) { sub(/^ +/, "", x); sub(/ +$/, "", x); return x }
+        # columns by the header position, so names may contain any spaces
+        /Network name/ { ns = index($0, "Network name"); ss = index($0, "Security")
+                         gs = index($0, "Signal"); next }
+        !ns || /^-+ *$/ || !NF { next }
+        { name = trim(substr($0, ns, ss - ns)); sec = trim(substr($0, ss, gs - ss))
+          if (name != "" && sec != "") print sec "\t" name }'
+}
+
+dev=""
+if [ "${1:-}" = --status ]; then
+    for d in /sys/class/net/*/wireless; do
+        d=${d%/wireless}; d=${d##*/}
+        [ "$d" = "*" ] && continue
+        s=$(connected_to "$d"); [ -n "$s" ] && { echo "$s"; exit 0; }
+    done
+    exit 1
+fi
+
+size
+if ! dev=$(find_device); then
+    note "No Wi-Fi was found on this device.
+
+If it has a Wi-Fi switch or key, turn it on and try again. You can still install from this USB without internet."
+    exit 1
+fi
+
+while :; do
+    wt --title "Wi-Fi" --infobox "Looking for networks..." 7 "$W"
+    mapfile -t nets < <(networks "$dev")
+    items=()
+    for n in "${nets[@]}"; do
+        case ${n%%$'\t'*} in
+            open) kind="open" ;; 8021x) kind="company login" ;; *) kind="password" ;;
+        esac
+        items+=("${n#*$'\t'}" "$kind")
+    done
+    items+=("+ hidden" "a network that doesn't show its name" "+ again" "look again")
+    size
+    ssid=$(wt --title "Wi-Fi" --menu "Pick your network" "$H" "$W" $(( H - 8 )) "${items[@]}") || exit 1
+    [ "$ssid" = "+ again" ] && continue
+    sec="" hidden=0
+    if [ "$ssid" = "+ hidden" ]; then
+        ssid=$(wt --title "Wi-Fi" --inputbox "Name of the hidden network" 10 "$W") || continue
+        [ -n "$ssid" ] || continue
+        sec=psk hidden=1
+    else
+        for n in "${nets[@]}"; do [ "${n#*$'\t'}" = "$ssid" ] && { sec=${n%%$'\t'*}; break; }; done
+    fi
+    if [ "$sec" = 8021x ]; then
+        note "Networks that ask for a user name (802.1X) can be set up after installing, in Settings."
+        continue
+    fi
+    psk=""
+    if [ "$sec" != open ]; then
+        psk=$(wt --title "Wi-Fi" --passwordbox "Password for $ssid" 10 "$W") || continue
+    fi
+    wt --title "Wi-Fi" --infobox "Connecting to $ssid..." 7 "$W"
+    if (( hidden )); then
+        iwctl --passphrase "$psk" station "$dev" connect-hidden "$ssid" &>/dev/null
+    elif [ -n "$psk" ]; then
+        iwctl --passphrase "$psk" station "$dev" connect "$ssid" &>/dev/null
+    else
+        iwctl station "$dev" connect "$ssid" &>/dev/null
+    fi
+    for _ in $(seq 15); do [ "$(connected_to "$dev")" = "$ssid" ] && break; sleep 1; done
+    if [ "$(connected_to "$dev")" = "$ssid" ]; then
+        install -d -m700 "${STATE%/*}"
+        ( umask 077; printf 'WIFI_SSID=%q\nWIFI_PSK=%q\nWIFI_SEC=%q\nWIFI_HIDDEN=%q\n' "$ssid" "$psk" "$sec" "$hidden" > "$STATE" )
+        note "Connected to $ssid. The installed termOS will join it too."
+        exit 0
+    fi
+    note "Could not connect to $ssid. Check the password and try again."
+done

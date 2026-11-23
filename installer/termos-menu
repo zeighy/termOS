@@ -1,0 +1,45 @@
+#!/bin/bash
+# termOS live USB: the first screen. Starts by itself on the tablet's screen;
+# "Open a terminal" leaves it, and typing termos-menu brings it back.
+TITLE="termOS live USB"
+size() {
+    read -r H W < <(stty size 2>/dev/null || echo "24 80")
+    H=$(( H > 30 ? 30 : H - 2 )); W=$(( W > 76 ? 76 : W - 4 ))
+}
+wt() { size; whiptail --backtitle "$TITLE" "$@" 3>&1 1>&2 2>&3; }
+pause() { echo; read -rp "Press Enter to return to the menu. " _; }
+
+choice=install
+while :; do
+    if net=$(termos-wifi --status 2>/dev/null); then wifi="Wi-Fi: connected to $net"; else wifi="Wi-Fi: not connected"; fi
+    size
+    choice=$(wt --title "termOS" --default-item "$choice" --menu \
+"Welcome. Sideways or upside down? Pick \"Turn the screen\" until it's upright.
+
+$wifi" "$H" "$W" 8 \
+        rotate  "Turn the screen" \
+        install "Install termOS (from this USB, no internet needed)" \
+        online  "Install with the newest packages (needs internet)" \
+        wifi    "Connect to Wi-Fi" \
+        shell   "Open a terminal (type termos-menu to come back)" \
+        off     "Power off" \
+        restart "Restart") || choice=shell
+    case $choice in
+        rotate)  rotscr >/dev/null ;;
+        wifi)    termos-wifi ;;
+        install) clear; termos-install; pause ;;
+        online)
+            if ! termos-wifi --status >/dev/null && ! ip route get 1.1.1.1 &>/dev/null; then
+                wt --title "No internet" --yesno "There's no internet connection yet. Connect to Wi-Fi now?" 9 "$W" \
+                    && termos-wifi
+            fi
+            clear; termos-install --online; pause ;;
+        shell)
+            clear
+            echo "This is the live USB's terminal. Type termos-menu to return to the menu,"
+            echo "or rotscr to turn the screen."
+            exit 0 ;;
+        off)     systemctl poweroff ;;
+        restart) systemctl reboot ;;
+    esac
+done

@@ -23,6 +23,9 @@ iso_publisher="termOS"
 iso_application="termOS install medium"
 file_permissions+=(["/usr/local/bin/termos-install"]="0:0:755")
 file_permissions+=(["/usr/local/bin/termos-console"]="0:0:755")
+file_permissions+=(["/usr/local/bin/termos-menu"]="0:0:755")
+file_permissions+=(["/usr/local/bin/termos-wifi"]="0:0:755")
+file_permissions+=(["/usr/local/bin/rotscr"]="0:0:755")
 PDEF
 
 AIR=$PROFILE/airootfs
@@ -31,6 +34,18 @@ AIR=$PROFILE/airootfs
 rm -f "$AIR/etc/systemd/system/sysinit.target.wants/systemd-time-wait-sync.service"
 # tablets: the console upright and readable (portrait-native panels), as when installed
 install -Dm755 "$SRC/rootfs/usr/local/bin/termos-console" "$AIR/usr/local/bin/termos-console"
+install -Dm755 "$SRC/rootfs/usr/local/bin/rotscr" "$AIR/usr/local/bin/rotscr"
+# the first screen is the termOS menu (install, Wi-Fi, turn the screen, terminal)
+install -Dm755 "$SRC/installer/termos-menu" "$AIR/usr/local/bin/termos-menu"
+install -Dm755 "$SRC/installer/termos-wifi" "$AIR/usr/local/bin/termos-wifi"
+cat >> "$AIR/root/.zlogin" <<'ZLOGIN'
+
+# termOS: open the menu on the tablet's own screen, once per boot
+if [[ $(tty) == /dev/tty1 && ! -e /run/termos/menu-shown ]]; then
+    mkdir -p /run/termos && : > /run/termos/menu-shown
+    termos-menu
+fi
+ZLOGIN
 install -Dm644 "$SRC/rootfs/etc/systemd/system/termos-console.service" "$AIR/etc/systemd/system/termos-console.service"
 ln -sf /etc/systemd/system/termos-console.service "$AIR/etc/systemd/system/multi-user.target.wants/termos-console.service"
 install -Dm755 "$SRC/installer/termos-install" "$AIR/usr/local/bin/termos-install"
@@ -38,13 +53,12 @@ mkdir -p "$AIR/opt/termos"
 cp "$SRC/packages.x86_64" "$AIR/opt/termos/"
 echo "${TERMOS_VERSION:-dev}" > "$AIR/opt/termos/version"
 cp -a "$SRC/rootfs" "$AIR/opt/termos/rootfs"
-cat >> "$AIR/etc/motd" <<'MOTD'
+cat > "$AIR/etc/motd" <<'MOTD'
 
-  ==================  termOS  ==================
-  To install termOS (ERASES the chosen disk):
-      termos-install            offline, from this USB
-      termos-install --online   newest packages (needs a network; it can join Wi-Fi)
-  ==============================================
+  ==================  termOS live USB  ==================
+    termos-menu   install, Wi-Fi, turn the screen
+    rotscr        turn the screen 90 degrees
+  =======================================================
 
 MOTD
 

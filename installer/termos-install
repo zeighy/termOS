@@ -312,61 +312,18 @@ XKB=${KEYMAP%%-*}
 
 # ---------------------------------------------------------------- Wi-Fi
 # Optional, and kept for the installed system (as a NetworkManager connection).
-WIFI_SSID="" WIFI_PSK="" WIFI_SEC=""
-wifi_dev=""
-if compgen -G '/sys/class/net/*/wireless' >/dev/null; then
-    # the first device iwd runs as a Wi-Fi client
-    wifi_dev=$(iwctl station list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' \
-        | awk '/^-+ *$/ { n++; next } n >= 2 && NF { print $1; exit }')
-    [[ -n $wifi_dev && -e /sys/class/net/$wifi_dev/wireless ]] || wifi_dev=""
-fi
-wifi_networks() {   # "security<TAB>name" per network, as iwctl lists them (strongest first)
-    iwctl station "$wifi_dev" scan &>/dev/null
-    sleep 4
-    iwctl station "$wifi_dev" get-networks 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | awk '
-        function trim(x) { sub(/^ +/, "", x); sub(/ +$/, "", x); return x }
-        # columns by the header position, so names may contain any spaces
-        /Network name/ { ns = index($0, "Network name"); ss = index($0, "Security")
-                         gs = index($0, "Signal"); next }
-        !ns || /^-+ *$/ || !NF { next }
-        { name = trim(substr($0, ns, ss - ns)); sec = trim(substr($0, ss, gs - ss))
-          if (name != "" && sec != "") print sec "\t" name }'
-}
-wifi_connected() { iwctl station "$wifi_dev" show 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | grep -q 'State *connected'; }
-if (( TUI )) && [[ -n $wifi_dev ]]; then
-    while wt --title "Wi-Fi" --yesno "Connect to Wi-Fi now? termOS will join the same network after installing. \
-(Not needed to install from this USB.)" 10 "$W"; do
-        wt --title "Wi-Fi" --infobox "Looking for networks..." 7 "$W"
-        mapfile -t nets < <(wifi_networks)
-        if (( ! ${#nets[@]} )); then note "No networks found." "Wi-Fi"; continue; fi
-        items=()
-        for n in "${nets[@]}"; do
-            case ${n%%$'\t'*} in
-                open) kind="open" ;; 8021x) kind="company login" ;; *) kind="password" ;;
-            esac
-            items+=("${n#*$'\t'}" "$kind")
-        done
-        size
-        ssid=$(wt --menu "Pick your network" "$H" "$W" $(( H - 8 )) "${items[@]}") || continue
-        WIFI_SEC=""
-        for n in "${nets[@]}"; do [[ ${n#*$'\t'} == "$ssid" ]] && { WIFI_SEC=${n%%$'\t'*}; break; }; done
-        if [[ $WIFI_SEC == 8021x ]]; then
-            note "Networks that ask for a user name (802.1X) can be set up after installing, in Settings." "Wi-Fi"
-            continue
-        fi
-        psk=""
-        if [[ $WIFI_SEC != open ]]; then psk=$(wt --passwordbox "Password for $ssid" 10 "$W") || continue; fi
-        wt --title "Wi-Fi" --infobox "Connecting to $ssid..." 7 "$W"
-        if [[ -n $psk ]]; then iwctl --passphrase "$psk" station "$wifi_dev" connect "$ssid" &>/dev/null || true
-        else iwctl station "$wifi_dev" connect "$ssid" &>/dev/null || true; fi
-        for _ in $(seq 15); do wifi_connected && break; sleep 1; done
-        if wifi_connected; then
-            WIFI_SSID=$ssid WIFI_PSK=$psk
-            note "Connected to $ssid." "Wi-Fi"
-            break
-        fi
-        note "Could not connect to $ssid. Check the password and try again." "Wi-Fi"
-    done
+# termos-wifi (live USB) connects and remembers the network in /run/termos/wifi.
+WIFI_SSID="" WIFI_PSK="" WIFI_HIDDEN=0
+if (( TUI )) && command -v termos-wifi >/dev/null; then
+    if ! termos-wifi --status >/dev/null 2>&1 \
+       && wt --title "Wi-Fi" --yesno "Connect to Wi-Fi now? termOS will join the same network after installing. \
+(Not needed to install from this USB.)" 10 "$W"; then
+        termos-wifi || true
+    fi
+    if [[ -r /run/termos/wifi ]] && termos-wifi --status >/dev/null 2>&1; then
+        # shellcheck source=/dev/null
+        . /run/termos/wifi
+    fi
 fi
 
 summary="Disk:       $DISK ($(lsblk -dno SIZE,MODEL "$DISK" | xargs))
@@ -454,7 +411,7 @@ sed -i 's/relatime/noatime/' "$MNT/etc/fstab"
 cp -a "$ROOTFS/." "$MNT/"
 chmod 0440 "$MNT"/etc/sudoers.d/*
 cp "$TERMOS/version" "$MNT/etc/termos/version" 2>/dev/null || true
-chmod 0755 "$MNT"/usr/local/bin/termos-*
+chmod 0755 "$MNT"/usr/local/bin/*   # archiso resets the modes of files on the ISO
 
 # pacman mirror for updates (installed system uses the normal Arch repos)
 if grep -q '^Server' /etc/pacman.d/mirrorlist 2>/dev/null; then
@@ -465,6 +422,11 @@ else
 fi
 sed -i 's/^#ParallelDownloads.*/ParallelDownloads = 5/; s/^#Color$/Color/' "$MNT/etc/pacman.conf"
 
+# a screen rotation chosen on the live USB (rotscr) is kept
+if [[ -s /run/termos/console-rotation ]]; then
+    install -Dm644 /run/termos/console-rotation "$MNT/etc/termos/console-rotation"
+fi
+
 if [[ -n $WIFI_SSID ]]; then
     # NetworkManager keyfile: the name as a byte list (safe for any characters)
     nm="$MNT/etc/NetworkManager/system-connections"
@@ -473,8 +435,10 @@ if [[ -n $WIFI_SSID ]]; then
     psk=${WIFI_PSK//\\/\\\\}
     [[ $psk == " "* ]] && psk="\\s${psk:1}"
     {
-        printf '[connection]\nid=%s\ntype=wifi\n\n[wifi]\nmode=infrastructure\nssid=%s;\n\n' \
+        printf '[connection]\nid=%s\ntype=wifi\n\n[wifi]\nmode=infrastructure\nssid=%s;\n' \
             "termOS Wi-Fi" "$ssid_bytes"
+        [[ $WIFI_HIDDEN == 1 ]] && printf 'hidden=true\n'
+        printf '\n'
         [[ -n $WIFI_PSK ]] && printf '[wifi-security]\nkey-mgmt=wpa-psk\npsk=%s\n\n' "$psk"
         printf '[ipv4]\nmethod=auto\n\n[ipv6]\nmethod=auto\n'
     } > "$nm/termos-wifi.nmconnection"
