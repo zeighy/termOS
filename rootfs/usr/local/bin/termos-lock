@@ -1,0 +1,499 @@
+#!/usr/bin/env python3
+"""termOS lock screen (ext-session-lock): PIN pad, password fallback, PIN set-up.
+
+  termos-lock --gate    boot: shown before the desktop exists (see termos-session)
+  termos-lock           in the session: run and supervised by termos-session-watch
+
+Use  termos-lock-now  to lock the screen. This process exits 0 only after a
+successful unlock. If it dies any other way the compositor keeps the screen
+locked and a supervisor starts it again.
+
+There are deliberately no entries, menus, tooltips or dialogs here: each of
+those would open another surface, and some of them can launch things.
+"""
+import os
+import signal
+import sys
+import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib", "termos"))
+from termosui import core, secrets_client as secret, ui  # noqa: E402
+
+import gi  # noqa: E402
+
+gi.require_version("GtkSessionLock", "0.1")
+from gi.repository import Gdk, GLib, Gtk, GtkSessionLock  # noqa: E402
+
+GATE = "--gate" in sys.argv[1:]
+LOCKED_MARK = os.path.join(core.RUN_DIR, "lock-shown")
+GATE_MARK = os.path.join(core.RUN_DIR, "gate-passed")
+MAX_PIN, MAX_PASSWORD = 10, 128
+
+CSS = """
+window.lock {{ background-image: linear-gradient(to bottom right, {crust}, {base}); }}
+.lock .clock {{ font-size: 78px; font-weight: 300; color: {bright}; }}
+.lock .small-clock {{ font-size: 46px; }}
+.lock .date {{ font-size: 19px; color: {text}; }}
+.lock .prompt {{ font-size: 18px; font-weight: bold; }}
+.lock .typed {{ font-size: 22px; min-height: 30px; color: {accent}; }}
+.lock .message {{ font-size: 14px; min-height: 20px; }}
+.lock button.digit {{ border-radius: 999px; font-size: 24px; padding: 0; min-width: 0; min-height: 0; }}
+.lock button.digit .icon {{ font-size: 24px; }}
+.lock button.key {{ padding: 0; min-width: 0; font-size: 19px; border-radius: 8px; }}
+.lock button.key .icon {{ font-size: 21px; }}
+.lock .foot {{ font-size: 14px; color: {muted}; }}
+
+/* Keys must look the same whether or not they were touched: GTK leaves the
+   hover state on a button after a tap, which would show the PIN's digits. */
+.lock button.digit, .lock button.digit:hover, .lock button.digit:active,
+.lock button.key, .lock button.key:hover, .lock button.key:active {{
+    background-color: {raised}; color: {text}; transition: none; }}
+.lock button.digit.flat, .lock button.digit.flat:hover, .lock button.digit.flat:active {{
+    background-color: transparent; }}
+.lock button.digit.primary, .lock button.digit.primary:hover, .lock button.digit.primary:active,
+.lock button.key.primary, .lock button.key.primary:hover, .lock button.key.primary:active {{
+    background-color: {accent}; color: {crust}; }}
+"""
+
+LETTERS = ["1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"]
+SYMBOLS = ["1234567890", "!@#$%^&*()", "-_=+[]{}\\|", ";:'\",.<>/?", "`~"]
+PROMPTS = {
+    "pin": "Enter your PIN",
+    "password": "Enter your account password",
+    "enroll": "Enter your account password to set up a PIN",
+    "new": "Choose a PIN (4 to 10 digits)",
+    "again": "Enter the new PIN again",
+}
+
+
+class Model:
+    """What every screen shows; there is one model however many screens there are."""
+
+    def __init__(self, on_unlock):
+        self.on_unlock = on_unlock
+        self.views = []
+        self.typed = ""
+        self.mode = "loading"
+        self.message = ""
+        self.is_error = False
+        self.busy = False
+        self.until = 0.0            # monotonic time until which input waits
+        self.password = None        # kept only while a new PIN is being chosen
+        self.new_pin = None
+        self.has_pin = False
+        self.shift = False
+        self.symbols = False
+        GLib.timeout_add(500, self.tick)
+        self.load()
+
+    def load(self):
+        ui.background(lambda: secret.call("status"), self.loaded)
+
+    def loaded(self, result):
+        code, info = result or (secret.BAD, {})
+        if code != secret.OK:
+            self.say("Can't check your PIN right now. Retrying…", True)
+            GLib.timeout_add_seconds(3, lambda: (self.load(), False)[1])
+            return
+        self.has_pin = bool(info.get("set"))
+        if not self.has_pin:
+            self.go("enroll")
+        elif info.get("pin_blocked"):
+            self.go("password", "Too many wrong PINs. Use your account password.", True)
+            self.hold(info.get("password_wait", 0))
+        else:
+            self.go("pin")
+            self.hold(info.get("pin_wait", 0))
+
+    def go(self, mode, message="", error=False):
+        self.mode, self.typed, self.until = mode, "", 0.0
+        self.shift = self.symbols = False
+        self.message, self.is_error = message, error
+        for v in self.views:
+            v.rebuild()
+
+    def say(self, message="", error=False):
+        self.message, self.is_error = message, error
+        self.refresh()
+
+    def hold(self, seconds):
+        if seconds:
+            self.until = time.monotonic() + seconds
+            self.refresh()
+
+    def waiting(self):
+        return max(0, int(self.until - time.monotonic() + 0.999))
+
+    def tick(self):
+        for v in self.views:
+            v.update_clock()
+        if self.until:
+            if not self.waiting():
+                self.until = 0.0
+                self.message = ""
+            self.refresh()
+        return True
+
+    def refresh(self):
+        for v in self.views:
+            v.refresh()
+
+    def numeric(self):
+        return self.mode in ("pin", "new", "again")
+
+    def accepts_input(self):
+        return not self.busy and not self.waiting() and self.mode not in ("loading", "done")
+
+    def type(self, char):
+        if not self.accepts_input() or (self.numeric() and char not in "0123456789"):
+            return
+        if len(self.typed) < (MAX_PIN if self.numeric() else MAX_PASSWORD):
+            self.typed += char
+            self.message = ""
+            self.refresh()
+
+    def backspace(self):
+        if not self.busy:
+            self.typed = self.typed[:-1]
+            self.refresh()
+
+    def wipe(self):
+        if not self.busy:
+            self.typed = ""
+            self.refresh()
+
+    def submit(self):
+        if not self.accepts_input() or not self.typed:
+            return
+        value, mode = self.typed, self.mode
+        self.typed = ""
+        if mode == "again":
+            if value != self.new_pin:
+                self.new_pin = None
+                self.go("new", "Those didn't match. Try again.", True)
+                return
+            work = (lambda: secret.call("set", "password", self.password, value))
+        elif mode == "new":
+            work = (lambda: secret.call("check", value, sudo=False))
+        else:
+            kind = "pin" if mode == "pin" else "password"
+            work = (lambda: secret.call(f"verify-{kind}", value))
+        self.busy = True
+        self.say("Checking…")
+        ui.background(work, lambda result: self.checked(mode, value, result))
+
+    def checked(self, mode, value, result):
+        self.busy = False
+        code, info = result or (secret.BAD, {})
+        if code == secret.OK:
+            if mode == "pin":
+                self.finish()
+            elif mode in ("password", "enroll"):
+                self.password = value
+                if mode == "enroll":
+                    self.go("new")
+                else:
+                    self.go("new", "Password accepted. Choose a new PIN, or keep the current one.")
+            elif mode == "new":
+                self.new_pin = value
+                self.go("again")
+            else:
+                self.finish()
+            return
+        if mode == "new":
+            self.say(info.get("error") or "That PIN can't be used.", True)
+        elif mode == "again":
+            self.go("enroll", "Saving the PIN failed. Enter your password again.", True)
+        elif mode == "pin" and info.get("pin_blocked"):
+            self.go("password", "Too many wrong PINs. Use your account password.", True)
+        else:
+            what = "PIN" if mode == "pin" else "password"
+            wrong = code in (secret.WRONG, secret.WAIT)
+            self.say(f"Wrong {what}." if wrong else info.get("error", "That didn't work."), True)
+            self.hold(info.get("pin_wait" if mode == "pin" else "password_wait", 0))
+
+    def finish(self):
+        self.mode = "done"
+        self.password = self.new_pin = None
+        self.typed = ""
+        self.on_unlock()
+
+
+class View:
+    """The lock surface on one monitor."""
+
+    def __init__(self, model, monitor):
+        self.model = model
+        self.monitor = monitor
+        self.window = ui.classes(Gtk.Window(), "termos", "lock")
+        self.window.add_events(Gdk.EventMask.KEY_PRESS_MASK)
+        self.window.connect("key-press-event", self.key)
+        self.window.connect("size-allocate", self.resized)
+        self.size = (0, 0)
+        self.queued = 0
+        self.letter_keys = []
+        self.build()
+
+    def resized(self, _w, alloc):
+        size = (alloc.width, alloc.height)
+        if size != self.size:
+            self.size = size
+            self.rebuild()
+
+    def rebuild(self):
+        # never from inside an allocation or a click on the widget being replaced
+        if not self.queued:
+            self.queued = GLib.idle_add(self.build)
+
+    def build(self):
+        self.queued = 0
+        child = self.window.get_child()
+        if child:
+            child.destroy()
+        self.letter_keys = []
+        width, height = self.size if self.size[0] > 1 else (1280, 800)
+        keyboard = self.model.mode in ("password", "enroll")
+        wide = width > height and width >= 620
+
+        head = ui.vbox(0)
+        head.set_valign(Gtk.Align.CENTER)
+        small = keyboard or height < 720 and not wide
+        self.clock = ui.label("", "clock", "small-clock" if small else None, xalign=0.5)
+        self.date = ui.label("", "date", xalign=0.5)
+        head.pack_start(self.clock, False, False, 0)
+        head.pack_start(self.date, False, False, 0)
+
+        self.prompt = ui.label("", "prompt", xalign=0.5, wrap=True)
+        self.prompt.set_justify(Gtk.Justification.CENTER)
+        self.typed = ui.label("", "typed", xalign=0.5)
+        self.typed.set_ellipsize(1)     # start: keep the newest dot visible
+        self.msg = ui.label("", "message", xalign=0.5, wrap=True)
+        self.msg.set_justify(Gtk.Justification.CENTER)
+        status = ui.vbox(6)
+        for w in (self.prompt, self.typed, self.msg):
+            status.pack_start(w, False, False, 0)
+
+        body = ui.vbox(0)
+        body.set_border_width(10)
+        if keyboard:
+            upper = ui.vbox(8)
+            upper.set_valign(Gtk.Align.CENTER)
+            if height >= 430:
+                upper.pack_start(head, False, False, 0)
+            upper.pack_start(status, False, False, 0)
+            body.pack_start(upper, True, True, 0)
+            body.pack_start(self.footer(), False, False, 4)
+            body.pack_start(self.keyboard(width, height), False, False, 0)
+        else:
+            space = height - 230 if wide else height - 400
+            size = max(40, min(80, int((space - 30) / 4), int((min(width, 460) - 80) / 3)))
+            pad = ui.vbox(10)
+            pad.set_valign(Gtk.Align.CENTER)
+            pad.set_halign(Gtk.Align.CENTER)
+            pad.pack_start(status, False, False, 0)
+            pad.pack_start(self.keypad(size), False, False, 0)
+            if wide:
+                split = ui.hbox(0)
+                split.set_homogeneous(True)
+                split.add(head)
+                split.add(pad)
+                body.pack_start(split, True, True, 0)
+            else:
+                middle = ui.vbox(20)
+                middle.set_valign(Gtk.Align.CENTER)
+                middle.pack_start(head, False, False, 0)
+                middle.pack_start(pad, False, False, 0)
+                body.pack_start(middle, True, True, 0)
+            body.pack_start(self.footer(), False, False, 4)
+        self.window.add(body)
+        body.show_all()
+        self.update_clock()
+        self.refresh()
+        return False
+
+    def tap_button(self, text, action, *cls, icon_name=None, tip=None):
+        # not focusable, so Enter or Space on a keyboard can't press the last key tapped
+        b = ui.button(text, action, *cls, icon_name=icon_name)
+        b.set_can_focus(False)
+        if tip:
+            b.get_accessible().set_name(tip)
+        return b
+
+    def keypad(self, size):
+        m = self.model
+        grid = Gtk.Grid(row_spacing=10, column_spacing=22)
+        grid.set_halign(Gtk.Align.CENTER)
+        for i, d in enumerate("123456789"):
+            b = self.tap_button(d, lambda d=d: m.type(d), "digit")
+            b.set_size_request(size, size)
+            grid.attach(b, i % 3, i // 3, 1, 1)
+        extras = (self.tap_button(None, m.backspace, "digit", "flat", icon_name="backspace", tip="Delete"),
+                  self.tap_button("0", lambda: m.type("0"), "digit"),
+                  self.tap_button(None, m.submit, "digit", "primary", icon_name="check", tip="OK"))
+        for col, b in enumerate(extras):
+            b.set_size_request(size, size)
+            grid.attach(b, col, 3, 1, 1)
+        return grid
+
+    def keyboard(self, width, height):
+        m = self.model
+        unit = min(width - 20, 1100) / 10
+        tall = max(38, min(62, int((height - 230) / 5.5)))
+        box = ui.vbox(5)
+
+        def key(text, action, span=1.0, *cls, icon_name=None, tip=None):
+            b = self.tap_button(text, action, "key", *cls, icon_name=icon_name, tip=tip)
+            b.set_size_request(int(unit * span) - 6, tall)
+            return b
+
+        for n, chars in enumerate(SYMBOLS if m.symbols else LETTERS):
+            line = ui.hbox(5)
+            line.set_halign(Gtk.Align.CENTER)
+            last = not m.symbols and n == 3
+            if last:
+                shift = key(None, self.toggle_shift, 1.4, "primary" if m.shift else None,
+                            icon_name="shift", tip="Shift")
+                line.add(shift)
+            for c in chars:
+                char = c.upper() if m.shift and not m.symbols else c
+                b = key(char, lambda ch=char: self.tap_char(ch))
+                line.add(b)
+            if last or m.symbols and n == 4:
+                line.add(key(None, m.backspace, 1.4, icon_name="backspace", tip="Delete"))
+            box.add(line)
+        line = ui.hbox(5)
+        line.set_halign(Gtk.Align.CENTER)
+        line.add(key("abc" if m.symbols else "#+=", self.toggle_symbols, 1.8))
+        line.add(key("space", lambda: m.type(" "), 5.8))
+        line.add(key(None, m.submit, 2.0, "primary", icon_name="enter", tip="OK"))
+        box.add(line)
+        return box
+
+    def tap_char(self, char):
+        m = self.model
+        m.type(char)
+        if m.shift:
+            self.toggle_shift()
+
+    def toggle_shift(self):
+        self.model.shift = not self.model.shift
+        self.rebuild()
+
+    def toggle_symbols(self):
+        self.model.symbols = not self.model.symbols
+        self.rebuild()
+
+    def footer(self):
+        m = self.model
+        line = ui.hbox(8, "foot")
+        self.device = ui.label("", "foot", ellipsize=True)
+        line.pack_start(self.device, True, True, 6)
+        sleep = self.tap_button(None, lambda: core.spawn("systemctl", "suspend"), "flat",
+                                icon_name="sleep", tip="Sleep")
+        line.pack_end(sleep, False, False, 0)
+        if m.mode == "pin":
+            line.pack_end(self.tap_button("Use password", lambda: m.go("password"), "flat"), False, False, 0)
+        elif m.mode == "password" and m.has_pin:
+            line.pack_end(self.tap_button("Use PIN", m.load, "flat"), False, False, 0)
+        elif m.mode == "new" and m.has_pin:
+            # only reachable after the password was accepted
+            line.pack_end(self.tap_button("Keep current PIN", m.finish, "flat"), False, False, 0)
+        return line
+
+    def update_clock(self):
+        self.clock.set_text(time.strftime("%H:%M"))
+        self.date.set_text(time.strftime("%A, %-d %B"))
+        text = core.hostname()
+        bat = core.battery()
+        if bat:
+            text += f"   ·   Battery {bat['percent']}%" + (", charging" if bat["charging"] else "")
+        self.device.set_text(text)
+
+    def refresh(self):
+        m = self.model
+        self.prompt.set_text(PROMPTS.get(m.mode, ""))
+        self.typed.set_text("●" * len(m.typed))
+        wait = m.waiting()
+        self.msg.set_text(f"Too many attempts. Try again in {secret.wait_text(wait)}." if wait else m.message)
+        ui.set_class(self.msg, "error", bool(wait) or m.is_error)
+
+    def key(self, _w, event):
+        m, k = self.model, event.keyval
+        if k in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_ISO_Enter):
+            m.submit()
+        elif k == Gdk.KEY_BackSpace:
+            m.backspace()
+        elif k == Gdk.KEY_Escape:
+            m.wipe()
+        elif not event.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK):
+            code = Gdk.keyval_to_unicode(k)
+            if code and chr(code).isprintable():
+                m.type(chr(code))
+        return True
+
+
+class Locker:
+    def __init__(self):
+        self.display = Gdk.Display.get_default()
+        self.lock = GtkSessionLock.prepare_lock()
+        self.lock.connect("locked", self.locked)
+        self.lock.connect("finished", self.refused)
+        self.model = Model(self.unlock)
+        self.unlocked = False
+
+    def start(self):
+        self.lock.lock_lock()
+        for i in range(self.display.get_n_monitors()):
+            self.add_monitor(self.display, self.display.get_monitor(i))
+        self.display.connect("monitor-added", self.add_monitor)
+        self.display.connect("monitor-removed", self.remove_monitor)
+
+    def add_monitor(self, _display, monitor):
+        view = View(self.model, monitor)
+        self.model.views.append(view)
+        self.lock.new_surface(view.window, monitor)
+        view.window.show_all()
+
+    def remove_monitor(self, _display, monitor):
+        for view in [v for v in self.model.views if v.monitor == monitor]:
+            self.model.views.remove(view)
+            if view.queued:
+                GLib.source_remove(view.queued)
+            GtkSessionLock.unmap_lock_window(view.window)
+            view.window.destroy()
+
+    def locked(self, _lock):
+        self.display.sync()
+        core.write_atomic(LOCKED_MARK, f"{os.getpid()}\n", 0o600)
+
+    def refused(self, _lock):
+        os._exit(3)     # another locker holds the screen
+
+    def unlock(self):
+        if GATE:
+            core.write_atomic(GATE_MARK, "ok\n", 0o600)
+        else:
+            # tell the watcher before the screen opens
+            core.write_atomic(os.path.join(core.RUN_DIR, "unlocked"), "ok\n", 0o600)
+        self.lock.unlock_and_destroy()
+        self.display.sync()
+        self.unlocked = True
+        Gtk.main_quit()
+
+
+def main():
+    for sig in (signal.SIGINT, signal.SIGTSTP, signal.SIGQUIT):
+        signal.signal(sig, signal.SIG_IGN)
+    os.makedirs(core.RUN_DIR, 0o700, exist_ok=True)
+    if not GtkSessionLock.is_supported():
+        print("termos-lock: the compositor can't lock the screen", file=sys.stderr)
+        return 1
+    ui.setup(CSS)
+    locker = Locker()
+    locker.start()
+    Gtk.main()
+    return 0 if locker.unlocked else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

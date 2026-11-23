@@ -1,0 +1,42 @@
+#!/bin/bash
+# termOS: make the text console upright and readable on tablets (boot messages,
+# the installer, ttys). Runs at boot on the live USB and on installed systems.
+#  - a portrait-native panel (eDP/DSI/LVDS taller than wide) is turned to
+#    landscape the same way termos-display-setup turns the desktop (wlroots
+#    "transform 90" matches fbcon rotation 3, counter-clockwise), unless the
+#    kernel already turned it (it knows some panels)
+#  - a big screen gets a bigger font
+#   termos-console          do both
+#   termos-console --check  print what it would do
+check=0; [ "${1:-}" = --check ] && check=1
+
+panel=""
+for _ in $(seq 50); do      # the display driver may still be loading
+    for c in /sys/class/drm/card*-eDP-* /sys/class/drm/card*-DSI-* /sys/class/drm/card*-LVDS-*; do
+        [ -s "$c/modes" ] && [ "$(cat "$c/status" 2>/dev/null)" = connected ] && { panel=$c; break 2; }
+    done
+    sleep 0.1
+done
+
+rotate=0 font=""
+if [ -n "$panel" ]; then
+    mode=$(head -n1 "$panel/modes"); w=${mode%%x*}; h=${mode#*x}; h=${h%%[!0-9]*}
+    if [[ $w =~ ^[0-9]+$ && $h =~ ^[0-9]+$ ]]; then
+        (( w < h )) && rotate=3
+        long=$(( w > h ? w : h ))
+        if (( long >= 1800 )); then font=ter-132b; elif (( long >= 1280 )); then font=ter-124b; fi
+    fi
+fi
+now=$(cat /sys/class/graphics/fbcon/rotate 2>/dev/null || echo 0)
+
+if (( check )); then
+    echo "panel=${panel##*/} mode=${mode:-none} rotate=$rotate (now $now) font=${font:-default}"
+    exit 0
+fi
+if (( rotate )) && [ "$now" = 0 ] && [ -w /sys/class/graphics/fbcon/rotate_all ]; then
+    echo "$rotate" > /sys/class/graphics/fbcon/rotate_all
+fi
+if [ -n "$font" ]; then
+    for t in /dev/tty[1-6]; do setfont -C "$t" "$font" 2>/dev/null || true; done
+fi
+exit 0

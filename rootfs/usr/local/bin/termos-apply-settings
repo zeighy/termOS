@@ -1,6 +1,6 @@
 #!/bin/bash
 # termOS: apply user settings from ~/.config/termos/settings.conf
-#   termos-apply-settings [all|wallpaper|windows|keyboard]
+#   termos-apply-settings [all|theme|wallpaper|windows|keyboard|touchpad]
 # Run at login (labwc autostart) and by termos-settings.
 conf="$HOME/.config/termos/settings.conf"
 WALLPAPER=/usr/share/backgrounds/termos/default.png
@@ -12,6 +12,16 @@ NATURAL_SCROLL=0
 rc="$HOME/.config/labwc/rc.xml"
 envf="$HOME/.config/labwc/environment"
 reconf=0
+
+theme() {
+    # On Wayland GTK reads these from gsettings, not from settings.ini
+    command -v gsettings >/dev/null || return 0
+    local k=org.gnome.desktop.interface
+    gsettings set $k gtk-theme adw-gtk3-dark
+    gsettings set $k icon-theme Papirus-Dark
+    gsettings set $k color-scheme prefer-dark
+    gsettings set $k font-name 'Adwaita Sans 11'
+}
 
 wallpaper() {
     pkill -u "$USER" -x swaybg
@@ -57,7 +67,8 @@ touchpad() {
 }
 
 case "${1:-all}" in
-    all) wallpaper; windows; keyboard; touchpad ;;
+    theme) theme ;;
+    all) theme; wallpaper; windows; keyboard; touchpad ;;
     touchpad) touchpad ;;
     wallpaper) wallpaper ;;
     windows) windows ;;

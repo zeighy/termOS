@@ -13,7 +13,14 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 mkdir -p out .work
-TERMOS_VERSION="$(date +%Y.%m.%d) ($(git rev-parse --short HEAD 2>/dev/null || echo dev))"
+# "-test" marks a build of code that isn't on GitHub's main yet: termos-update would
+# replace it with the older main, so it asks first (see termos-update).
+rev=$(git rev-parse --short HEAD 2>/dev/null || echo dev)
+if [[ $rev == dev ]] || ! git diff --quiet HEAD -- || [[ -n $(git ls-files --others --exclude-standard) ]] \
+   || ! git merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
+    rev+="-test"
+fi
+TERMOS_VERSION="$(date +%Y.%m.%d) ($rev)"
 docker pull -q archlinux:latest >/dev/null
 docker run --rm --privileged \
     -v "$PWD":/src:ro \

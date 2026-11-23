@@ -1,33 +1,28 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <openbox_menu>
   <menu id="root-menu" label="termOS">
-    <item label="All apps"><action name="Execute" command="termos-apps" /></item>
+    <item label="All apps"><action name="Execute" command="termos-show apps" /></item>
+    <item label="Quick settings"><action name="Execute" command="termos-show quick" /></item>
+    <item label="Open windows"><action name="Execute" command="termos-show windows" /></item>
+    <item label="Show home screen"><action name="Execute" command="termos-show desktop" /></item>
+    <separator />
     <item label="Terminal"><action name="Execute" command="foot" /></item>
     <item label="SSH hosts"><action name="Execute" command="termos-ssh" /></item>
     <item label="Browser"><action name="Execute" command="chromium" /></item>
     <item label="Files"><action name="Execute" command="thunar" /></item>
-    <item label="Remote Desktop (RDP/VNC)"><action name="Execute" command="remmina" /></item>
-    <separator />
-    <item label="On-screen keyboard"><action name="Execute" command="termos-osk toggle" /></item>
-    <menu id="display-menu" label="Display">
-      <item label="Rotate 90°"><action name="Execute" command="termos-rotate cw" /></item>
-      <item label="Auto-rotate on"><action name="Execute" command="termos-rotate auto" /></item>
-      <item label="Auto-rotate off"><action name="Execute" command="termos-rotate lock" /></item>
-    </menu>
+    <item label="Remote desktop"><action name="Execute" command="remmina" /></item>
     <menu id="screenshot-menu" label="Screenshot">
       <item label="Whole screen"><action name="Execute" command="termos-screenshot full" /></item>
       <item label="In 3 seconds"><action name="Execute" command="termos-screenshot delay" /></item>
       <item label="Select an area"><action name="Execute" command="termos-screenshot area" /></item>
     </menu>
     <item label="Settings"><action name="Execute" command="termos-settings" /></item>
-    <item label="Wi-Fi settings (text)"><action name="Execute" command="foot -e nmtui" /></item>
-    <item label="Update system"><action name="Execute" command="foot -T 'termOS update' -e termos-update" /></item>
     <separator />
-    <menu id="power-menu" label="Power">
-      <item label="Suspend"><action name="Execute" command="systemctl suspend" /></item>
-      <item label="Restart"><action name="Execute" command="systemctl reboot" /></item>
-      <item label="Shut down"><action name="Execute" command="systemctl poweroff" /></item>
-      <item label="Restart desktop"><action name="Exit" /></item>
+    <item label="Lock screen"><action name="Execute" command="termos-lock-now" /></item>
+    <item label="Power"><action name="Execute" command="termos-show power" /></item>
+    <menu id="restart-menu" label="Restart desktop">
+      <!-- a second tap, because it closes every app -->
+      <item label="Close apps and restart"><action name="Exit" /></item>
     </menu>
   </menu>
 </openbox_menu>

@@ -1,0 +1,12 @@
+#!/bin/bash
+# termOS boot gate: the only client of the first compositor (see termos-session).
+# labwc -S closes that compositor when this exits.
+termos-display-setup gate >/dev/null 2>&1 &
+termos-idle gate >/dev/null 2>&1
+# Anything but a successful unlock (exit 0) shows the lock screen again.
+until termos-lock --gate; do
+    sleep 0.5
+done
+termos-rotate stop >/dev/null 2>&1
+termos-idle stop >/dev/null 2>&1
+exit 0

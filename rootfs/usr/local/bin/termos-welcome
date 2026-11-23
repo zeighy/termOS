@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""termOS Welcome: first-run set-up of screen size, Wi-Fi, time zone, Tailscale and a first host."""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib", "termos"))
+from termosui import core, screens, ui, widgets  # noqa: E402
+
+from gi.repository import Gtk  # noqa: E402
+
+
+class Welcome(Gtk.ApplicationWindow):
+    def __init__(self):
+        super().__init__(title="Welcome")
+        self.set_default_size(760, 620)
+        self.set_icon_name("preferences-system")
+        self.steps = [self.scale_step, self.wifi_step, self.timezone_step,
+                      self.tailscale_step, self.host_step, self.done_step]
+        self.at = 0
+        outer = ui.vbox(0)
+        self.holder = ui.vbox(0)
+        outer.pack_start(self.holder, True, True, 0)
+        bar = ui.hbox(8)
+        bar.set_border_width(12)
+        self.back_btn = ui.button("Back", lambda: self.go(-1))
+        self.next_btn = ui.button("Next", lambda: self.go(1), "primary")
+        self.progress = ui.label("", "sub", xalign=0.5)
+        bar.pack_start(self.back_btn, False, False, 0)
+        bar.pack_start(self.progress, True, True, 0)
+        bar.pack_end(self.next_btn, False, False, 0)
+        outer.pack_start(bar, False, False, 0)
+        self.add(outer)
+        self.connect("destroy", self.mark_done)
+        self.show_step()
+
+    @staticmethod
+    def mark_done(_w):
+        core.write_atomic(os.path.join(core.CFG, "welcome-done"), "1\n")
+
+    def go(self, delta):
+        if self.at + delta >= len(self.steps):
+            self.destroy()
+            return
+        self.at = max(0, self.at + delta)
+        self.show_step()
+
+    def show_step(self):
+        ui.clear(self.holder)
+        page = ui.Page(640)
+        self.steps[self.at](page)
+        self.holder.pack_start(page.widget, True, True, 0)
+        self.holder.show_all()
+        last = len(self.steps) - 1
+        self.back_btn.set_sensitive(self.at > 0)
+        self.next_btn.get_child().get_children()[0].set_text("Done" if self.at == last else "Next")
+        self.progress.set_text(f"{self.at + 1} of {len(self.steps)}")
+
+    @staticmethod
+    def intro(p, icon, title, text):
+        p.box.pack_start(ui.icon(icon, "hero", "accent"), False, False, 10)
+        p.box.pack_start(ui.label(title, "title", xalign=0.5, wrap=True), False, False, 4)
+        sub = ui.label(text, "sub", xalign=0.5, wrap=True)
+        sub.set_justify(Gtk.Justification.CENTER)
+        p.box.pack_start(sub, False, False, 4)
+
+    def scale_step(self, p):
+        self.intro(p, "monitor", "Welcome to termOS",
+                   "First, pick a size that is easy to read and tap.")
+        outs = screens.connected()
+        if not outs:
+            return
+        out = next((o for o in outs if screens.is_builtin(o)), outs[0])
+        name, auto = out["name"], screens.auto_scale(out)
+        saved = screens.read_saved().get(name, ("auto", "auto"))[1]
+        options = [("auto", auto, f"Automatic ({round(auto * 100)} %)")]
+        options += [(s, float(s), f"{round(float(s) * 100)} %") for s in ("1", "1.25", "1.5", "1.75", "2")]
+        p.section("Size of text and buttons")
+        buttons = {}
+
+        def choose(key, value):
+            if core.run("wlr-randr", "--output", name, "--scale", f"{value:g}").returncode == 0:
+                screens.save(name, scale=key)
+                for k, b in buttons.items():
+                    ui.set_class(b, "primary", k == key)
+        for key, value, text in options:
+            b = ui.button(text, lambda k=key, v=value: choose(k, v))
+            ui.set_class(b, "primary", key == saved)
+            buttons[key] = b
+            p.add(b)
+
+    def wifi_step(self, p):
+        self.intro(p, "wifi", "Get connected", "Choose your Wi-Fi network, or skip this if you use a cable.")
+        p.section()
+        p.add(widgets.WifiList())
+
+    def timezone_step(self, p):
+        self.intro(p, "clock", "Where are you?", "So the clock shows the right time.")
+        p.section()
+        p.add(widgets.TimezonePicker())
+
+    def tailscale_step(self, p):
+        self.intro(p, "vpn", "A private network, if you use one",
+                   "Tailscale reaches your machines from anywhere. Skip this if you don't use it.")
+        p.section()
+        p.add(widgets.TailscaleControls())
+
+    def host_step(self, p):
+        self.intro(p, "server", "Add your first machine",
+                   "Saved machines appear on the home screen, one tap away.")
+        p.section()
+        p.add(ui.button("Add SSH host", lambda: core.spawn("termos-ssh", "add"), icon_name="plus"))
+        p.add(ui.button("Set up RDP or VNC", lambda: core.spawn("remmina"), icon_name="remote"))
+
+    def done_step(self, p):
+        self.intro(p, "check", "You're set", "A few things worth knowing:")
+        p.section()
+        for name, text in (
+            ("apps", "All apps are behind the blue button at the top left."),
+            ("home", "Home shows your machines. Tap it again to bring your windows back."),
+            ("keyboard", "The keyboard button shows the on-screen keyboard."),
+            ("wifi", "Tap the clock for Wi-Fi, brightness, volume, rotation and power."),
+            ("right", "When the top bar is full, use its arrows or swipe it sideways."),
+            ("lock", "The screen locks at start-up, after sleep and when it turns off."),
+        ):
+            line = ui.hbox(14)
+            mark = ui.icon(name, "accent")
+            mark.set_size_request(28, -1)
+            line.pack_start(mark, False, False, 0)
+            line.pack_start(ui.label(text, wrap=True), True, True, 0)
+            p.add(line)
+
+
+if __name__ == "__main__":
+    sys.exit(ui.main("Welcome", Welcome, "termos-welcome"))

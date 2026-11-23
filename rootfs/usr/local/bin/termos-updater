@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+"""termOS Update: runs  termos-update --gui  in a pseudo-terminal and shows its progress."""
+import codecs
+import os
+import pty
+import re
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib", "termos"))
+from termosui import core, ui  # noqa: E402
+
+from gi.repository import GLib, Gtk  # noqa: E402
+
+PROMPT = "[[termos-password]]"
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][A-Za-z0-9]")
+STEP = re.compile(r"^==> \[(\d+)/(\d+)\] (.+)$")
+COUNT = re.compile(r"^\(\s*(\d+)/(\d+)\)")
+CSS = """
+.log textview, .log textview text {{ background-color: {crust}; color: {muted}; }}
+progressbar trough, progressbar progress {{ min-height: 12px; border-radius: 8px; }}
+progressbar progress {{ background-color: {accent}; }}
+"""
+
+
+class Updater(Gtk.ApplicationWindow):
+    def __init__(self):
+        super().__init__(title="Update termOS")
+        ui.css(CSS)
+        self.set_default_size(720, 560)
+        self.set_icon_name("system-software-update")
+        self.pid = None
+        self.fd = None
+        self.partial = ""
+        self.step = (0, 1)
+        self.news = False
+        self.changes = []
+        self.wrong = False
+
+        box = ui.vbox(12)
+        box.set_border_width(16)
+        self.title_label = ui.label("Update termOS", "title", wrap=True)
+        self.detail = ui.label("Updates termOS and every app. Keep the device on and online; "
+                               "plug it in if the battery is low.", "sub", wrap=True)
+        self.bar = Gtk.ProgressBar()
+        for w in (self.title_label, self.detail, self.bar):
+            box.pack_start(w, False, False, 0)
+
+        self.ask = ui.hbox(8)
+        self.password = Gtk.Entry(placeholder_text="Your account password", visibility=False)
+        self.password.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+        self.password.set_width_chars(10)
+        self.password.connect("activate", lambda _e: self.send_password())
+        self.ask.pack_start(self.password, True, True, 0)
+        self.ask.pack_start(ui.button("Continue", self.send_password, "primary"), False, False, 0)
+        self.ask.show_all()
+        self.ask.set_no_show_all(True)
+        self.ask.hide()
+        box.pack_start(self.ask, False, False, 0)
+
+        self.whats_new = ui.label("", wrap=True)
+        self.whats_new.set_no_show_all(True)
+        box.pack_start(self.whats_new, False, False, 0)
+
+        self.buttons = ui.hbox(8)
+        self.start_btn = ui.button("Update now", self.start, "primary")
+        self.restart_btn = ui.button("Restart now", lambda: core.spawn("systemctl", "reboot"), "primary")
+        self.restart_btn.show_all()
+        self.restart_btn.set_no_show_all(True)
+        self.restart_btn.hide()
+        self.buttons.pack_start(self.start_btn, False, False, 0)
+        self.buttons.pack_start(self.restart_btn, False, False, 0)
+        box.pack_start(self.buttons, False, False, 0)
+
+        self.log = Gtk.TextView(editable=False, cursor_visible=False, monospace=True)
+        self.log.set_wrap_mode(Gtk.WrapMode.CHAR)
+        view = Gtk.ScrolledWindow()
+        view.set_min_content_height(180)
+        view.add(self.log)
+        details = Gtk.Expander(label="Details")
+        ui.classes(details, "log")
+        details.add(view)
+        box.pack_start(details, True, True, 0)
+        self.add(ui.Clamp(box, 720))
+        self.connect("delete-event", self.closing)
+
+    def closing(self, *_a):
+        if self.pid is None:
+            return False
+        ui.message(self, "The update is still running.",
+                   "Stopping halfway can leave apps broken. Wait for it to finish; "
+                   "you can keep using the device.")
+        return True
+
+    def start(self):
+        if self.pid is not None:
+            return
+        self.start_btn.hide()
+        self.whats_new.hide()
+        self.changes, self.partial, self.news = [], "", False
+        self.wrong = False
+        self.log.get_buffer().set_text("")
+        self.bar.set_fraction(0)
+        ui.set_class(self.title_label, "error", False)
+        self.title_label.set_text("Starting…")
+        pid, fd = pty.fork()
+        if pid == 0:
+            try:
+                env = dict(os.environ, SUDO_PROMPT=PROMPT, TERM="dumb")
+                os.execvpe("termos-update", ["termos-update", "--gui"], env)
+            finally:
+                os._exit(127)
+        self.pid, self.fd = pid, fd
+        self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        GLib.child_watch_add(GLib.PRIORITY_DEFAULT, pid, self.exited)
+        GLib.io_add_watch(fd, GLib.PRIORITY_DEFAULT, GLib.IOCondition.IN | GLib.IOCondition.HUP,
+                          self.readable)
+
+    def readable(self, fd, _cond):
+        if fd != self.fd:
+            return False
+        try:
+            data = os.read(fd, 65536)
+        except OSError:
+            data = b""
+        if not data:
+            return False
+        self.feed(self.decoder.decode(data))
+        return True
+
+    def feed(self, text):
+        text = ANSI.sub("", text)
+        data = self.partial + text.replace("\r\n", "\n")
+        if "Sorry, try again" in data:
+            self.wrong = True
+        if PROMPT in data:
+            data = data.replace(PROMPT, "")
+            self.title_label.set_text("Password needed")
+            self.detail.set_text("That password wasn't accepted. Use your account password, not the PIN."
+                                 if self.wrong else "Updating needs your account password (not the PIN).")
+            ui.set_class(self.detail, "error", self.wrong)
+            self.password.set_text("")
+            self.ask.show()
+            self.password.grab_focus()
+        *lines, self.partial = re.split(r"[\r\n]", data)
+        buf = self.log.get_buffer()
+        for line in lines:
+            if not line.strip():
+                continue
+            self.parse(line)
+            buf.insert(buf.get_end_iter(), line + "\n")
+        self.log.scroll_mark_onscreen(buf.get_insert())
+
+    def parse(self, line):
+        step, count = STEP.match(line), COUNT.match(line)
+        if step:
+            self.step = (int(step.group(1)) - 1, int(step.group(2)))
+            self.title_label.set_text(step.group(3))
+            self.detail.set_text("Keep the device on and online.")
+            self.bar.set_fraction(self.step[0] / self.step[1])
+            self.news = step.group(3).startswith("What's new")
+        elif count:
+            done, total = int(count.group(1)), max(int(count.group(2)), 1)
+            self.bar.set_fraction(min((self.step[0] + done / total) / self.step[1], 1))
+        elif self.news and line.startswith("    * "):
+            self.changes.append("•  " + line[6:])
+
+    def send_password(self):
+        value = self.password.get_text()
+        if not value or self.fd is None:
+            return
+        os.write(self.fd, value.encode() + b"\n")
+        self.password.set_text("")
+        self.ask.hide()
+        self.wrong = False
+        ui.set_class(self.detail, "error", False)
+        self.title_label.set_text("Working…")
+
+    def exited(self, pid, status):
+        GLib.spawn_close_pid(pid)
+        fd, self.fd = self.fd, None
+        if fd is not None:
+            try:
+                os.set_blocking(fd, False)
+                while True:
+                    data = os.read(fd, 65536)
+                    if not data:
+                        break
+                    self.feed(self.decoder.decode(data))
+            except OSError:
+                pass
+            os.close(fd)
+        self.pid = None
+        self.ask.hide()
+        if self.partial.strip():
+            self.feed("\n")
+        if os.waitstatus_to_exitcode(status) == 0:
+            self.bar.set_fraction(1)
+            self.title_label.set_text("Update finished")
+            self.detail.set_text("Restart to load everything. You'll land on the lock screen.")
+            if self.changes:
+                self.whats_new.set_text("What's new\n" + "\n".join(self.changes[:8]))
+                self.whats_new.show()
+            self.restart_btn.show()
+        else:
+            ui.set_class(self.title_label, "error", True)
+            self.title_label.set_text("Update failed")
+            buf = self.log.get_buffer()
+            lines = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False).splitlines()
+            reasons = [ln for ln in lines if "error" in ln.lower()]
+            if any("incorrect password attempt" in ln for ln in lines):
+                # Arch's faillock pauses sudo for 10 minutes after three wrong passwords
+                reasons.append("The password was wrong. After three wrong tries the account waits "
+                               "10 minutes before it accepts a password.")
+            why = reasons[-1] if reasons else (lines[-1] if lines else "It didn't start.")
+            self.detail.set_text(f"{why}\nSee Details for more. It's safe to try again.")
+            self.start_btn.get_child().get_children()[0].set_text("Try again")
+            self.start_btn.show()
+
+
+if __name__ == "__main__":
+    sys.exit(ui.main("Updater", Updater, "termos-update"))

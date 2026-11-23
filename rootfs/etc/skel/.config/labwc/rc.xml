@@ -6,11 +6,18 @@
   </core>
 
   <theme>
-    <cornerRadius>6</cornerRadius>
-    <font place="ActiveWindow"><name>sans</name><size>11</size><weight>bold</weight></font>
-    <font place="InactiveWindow"><name>sans</name><size>11</size></font>
-    <font place="MenuItem"><name>sans</name><size>14</size></font>
-    <font place="OnScreenDisplay"><name>sans</name><size>12</size></font>
+    <name>termOS</name>
+    <icon>Papirus-Dark</icon>
+    <!-- apps open maximized, so there is no maximize button; double-tap the title instead -->
+    <titlebar>
+      <layout>icon:iconify,close</layout>
+      <showTitle>yes</showTitle>
+    </titlebar>
+    <cornerRadius>10</cornerRadius>
+    <font place="ActiveWindow"><name>Adwaita Sans</name><size>11</size><weight>bold</weight></font>
+    <font place="InactiveWindow"><name>Adwaita Sans</name><size>11</size></font>
+    <font place="MenuItem"><name>Adwaita Sans</name><size>14</size></font>
+    <font place="OnScreenDisplay"><name>Adwaita Sans</name><size>12</size></font>
   </theme>
 
   <!-- Touch screen: map to the built-in panel so taps stay correct when the
@@ -42,9 +49,13 @@
     <keybind key="W-b"><action name="Execute" command="chromium" /></keybind>
     <keybind key="W-e"><action name="Execute" command="thunar" /></keybind>
     <keybind key="W-r"><action name="Execute" command="remmina" /></keybind>
-    <keybind key="W-a"><action name="Execute" command="termos-apps" /></keybind>
+    <keybind key="W-a"><action name="Execute" command="termos-show apps" /></keybind>
+    <keybind key="W-d"><action name="Execute" command="termos-show desktop" /></keybind>
+    <keybind key="W-Tab"><action name="Execute" command="termos-show windows" /></keybind>
+    <keybind key="W-c"><action name="Execute" command="termos-show quick" /></keybind>
     <keybind key="W-i"><action name="Execute" command="termos-settings" /></keybind>
     <keybind key="W-s"><action name="Execute" command="termos-ssh" /></keybind>
+    <keybind key="W-l"><action name="Execute" command="termos-lock-now" /></keybind>
     <keybind key="Print"><action name="Execute" command="termos-screenshot full" /></keybind>
     <keybind key="S-Print"><action name="Execute" command="termos-screenshot area" /></keybind>
     <keybind key="W-k"><action name="Execute" command="termos-osk toggle" /></keybind>
@@ -52,16 +63,17 @@
     <keybind key="W-q"><action name="Close" /></keybind>
     <keybind key="W-Up"><action name="ToggleMaximize" /></keybind>
     <keybind key="W-space"><action name="ShowMenu" menu="root-menu" /></keybind>
-    <keybind key="XF86MonBrightnessUp"><action name="Execute" command="brightnessctl -c backlight set +10%" /></keybind>
-    <keybind key="XF86MonBrightnessDown"><action name="Execute" command="brightnessctl -c backlight set 10%-" /></keybind>
-    <keybind key="XF86AudioRaiseVolume"><action name="Execute" command="pactl set-sink-volume @DEFAULT_SINK@ +5%" /></keybind>
-    <keybind key="XF86AudioLowerVolume"><action name="Execute" command="pactl set-sink-volume @DEFAULT_SINK@ -5%" /></keybind>
-    <keybind key="XF86AudioMute"><action name="Execute" command="pactl set-sink-mute @DEFAULT_SINK@ toggle" /></keybind>
+    <!-- These five also work on the lock screen: they can only change brightness and volume. -->
+    <keybind key="XF86MonBrightnessUp" allowWhenLocked="yes"><action name="Execute" command="termos-brightness up" /></keybind>
+    <keybind key="XF86MonBrightnessDown" allowWhenLocked="yes"><action name="Execute" command="termos-brightness down" /></keybind>
+    <keybind key="XF86AudioRaiseVolume" allowWhenLocked="yes"><action name="Execute" command="termos-volume up" /></keybind>
+    <keybind key="XF86AudioLowerVolume" allowWhenLocked="yes"><action name="Execute" command="termos-volume down" /></keybind>
+    <keybind key="XF86AudioMute" allowWhenLocked="yes"><action name="Execute" command="termos-volume mute" /></keybind>
   </keyboard>
 
   <mouse>
     <default />
-    <!-- Tapping (or left-clicking) the empty desktop opens the app/power menu. -->
+    <!-- The home screen covers the desktop; this menu is for when the shell is not running. -->
     <context name="Root">
       <mousebind button="Left" action="Press"><action name="ShowMenu" menu="root-menu" /></mousebind>
       <mousebind button="Right" action="Press"><action name="ShowMenu" menu="root-menu" /></mousebind>

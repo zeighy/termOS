@@ -1,8 +1,12 @@
 #!/bin/bash
-# termOS: tap-friendly brightness. "cycle" steps 100 -> 70 -> 40 -> 15 -> 100 %
-cur=$(brightnessctl -c backlight -m | cut -d, -f4 | tr -d %)
-next=100
-for l in 70 40 15; do
-    if [ "$cur" -gt "$l" ]; then next=$l; break; fi
-done
-brightnessctl -c backlight -q set "${next}%"
+# termOS brightness keys.   termos-brightness up|down
+case "${1:-}" in
+    up)   brightnessctl -c backlight -q set +10% ;;
+    down)   # never all the way to black
+        pct=$(brightnessctl -c backlight -m | cut -d, -f4 | tr -d %)
+        if [ "${pct:-0}" -le 13 ]; then brightnessctl -c backlight -q set 4%
+        else brightnessctl -c backlight -q set 10%-; fi ;;
+    *) sed -n '2p' "$0" >&2; exit 1 ;;
+esac
+termos-show brightness 2>/dev/null
+exit 0

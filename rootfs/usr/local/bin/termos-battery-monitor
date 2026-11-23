@@ -8,7 +8,9 @@ pconf=/etc/termos/power.conf
 warned=0
 bat=""
 for s in /sys/class/power_supply/*; do
-    [ "$(cat "$s/type" 2>/dev/null)" = Battery ] && { bat=$s; break; }
+    [ "$(cat "$s/type" 2>/dev/null)" = Battery ] || continue
+    [ "$(cat "$s/scope" 2>/dev/null)" = Device ] && continue    # mouse, pen, headset
+    bat=$s; break
 done
 [ -n "$bat" ] || exit 0       # desktop PC: nothing to do
 

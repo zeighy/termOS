@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Security Keys
+Comment=YubiKey, FIDO2 keys, passkeys and smart cards
+Exec=termos-keys
+Icon=dialog-password
+Categories=Settings;System;
+Keywords=yubikey;fido;fido2;u2f;passkey;webauthn;smartcard;piv;

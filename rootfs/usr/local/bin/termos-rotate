@@ -4,8 +4,10 @@
 #   termos-rotate auto     follow the accelerometer
 #   termos-rotate lock     stop following the accelerometer
 #   termos-rotate apply    re-apply the saved rotation
+#   termos-rotate stop     stop the sensor daemon without changing the setting
 conf="$HOME/.config/termos/display.conf"
 pidfile="${XDG_RUNTIME_DIR:-/tmp}/termos-autorotate.pid"
+if [ ! -f "$conf" ] && [ "${1:-}" = stop ]; then exit 0; fi
 [ -f "$conf" ] || { echo "no $conf yet (run termos-display-setup)"; exit 1; }
 . "$conf"
 [ -n "$PANEL" ] || exit 0
@@ -14,7 +16,7 @@ save() {
     sed -i -e "s/^ROT=.*/ROT=$ROT/" -e "s/^AUTO=.*/AUTO=$AUTO/" "$conf"
 }
 # Rotating while a finger is still on the screen leaves the touch "stuck"
-# (waybar fires on press). Defer manual rotations until the tap is over.
+# Defer manual rotations until the tap is over.
 apply_later() {
     setsid -f sh -c 'sleep 0.6; exec "$0" apply' "$0" >/dev/null 2>&1
 }
@@ -38,6 +40,8 @@ case "${1:-apply}" in
         ROT=$(( (ROT + 90) % 360 )); AUTO=0; save; apply_later ;;
     lock)
         stop_daemon; AUTO=0; save ;;
+    stop)
+        stop_daemon ;;
     auto)
         AUTO=1; save; exec "$0" start-daemon ;;
     start-daemon)
@@ -62,5 +66,5 @@ case "${1:-apply}" in
             ROT=$(( (t - BASE + 360) % 360 ))
             save; apply
         done ;;
-    *) sed -n '2,7p' "$0"; exit 1 ;;
+    *) sed -n '2,8p' "$0"; exit 1 ;;
 esac

@@ -22,9 +22,17 @@ iso_label="TERMOS_$(date --date="@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y%m)"
 iso_publisher="termOS"
 iso_application="termOS install medium"
 file_permissions+=(["/usr/local/bin/termos-install"]="0:0:755")
+file_permissions+=(["/usr/local/bin/termos-console"]="0:0:755")
 PDEF
 
 AIR=$PROFILE/airootfs
+# releng holds pacman-init (and the rest of boot) until internet time sync, with no
+# timeout. timesyncd still sets the clock whenever there is a network.
+rm -f "$AIR/etc/systemd/system/sysinit.target.wants/systemd-time-wait-sync.service"
+# tablets: the console upright and readable (portrait-native panels), as when installed
+install -Dm755 "$SRC/rootfs/usr/local/bin/termos-console" "$AIR/usr/local/bin/termos-console"
+install -Dm644 "$SRC/rootfs/etc/systemd/system/termos-console.service" "$AIR/etc/systemd/system/termos-console.service"
+ln -sf /etc/systemd/system/termos-console.service "$AIR/etc/systemd/system/multi-user.target.wants/termos-console.service"
 install -Dm755 "$SRC/installer/termos-install" "$AIR/usr/local/bin/termos-install"
 mkdir -p "$AIR/opt/termos"
 cp "$SRC/packages.x86_64" "$AIR/opt/termos/"
@@ -35,7 +43,7 @@ cat >> "$AIR/etc/motd" <<'MOTD'
   ==================  termOS  ==================
   To install termOS (ERASES the chosen disk):
       termos-install            offline, from this USB
-      termos-install --online   newest packages (needs network: iwctl)
+      termos-install --online   newest packages (needs a network; it can join Wi-Fi)
   ==============================================
 
 MOTD

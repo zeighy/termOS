@@ -1,11 +1,65 @@
 #!/bin/bash
-# termOS: idempotent system service setup, run as root by the installer
-# (inside the chroot) and by termos-update (with --now).
-now=""; [ "${1:-}" = --now ] && now=--now
+# termOS: idempotent system service setup, run as root.
+#   termos-system-setup --user NAME   from the installer (inside the chroot)
+#   termos-system-setup --now         from termos-update, on the running system
+now=""; user=""
+case "${1:-}" in
+    --now)  now=--now ;;
+    --user) user=${2:-} ;;
+esac
+
 [ -n "$now" ] && systemctl daemon-reload
 systemctl enable $now NetworkManager.service bluetooth.service termos-power.service \
-    systemd-timesyncd.service fstrim.timer systemd-boot-update.service
+    systemd-timesyncd.service fstrim.timer systemd-boot-update.service termos-console.service
 systemctl mask NetworkManager-wait-online.service
+# security keys and smart cards: both are socket-activated, so they cost nothing until used
+systemctl enable $now pcscd.socket
+systemctl --global enable ssh-agent.socket
+
+install -d -m 700 /var/lib/termos/lock || exit 1
+
+# ---- the desktop is a service that always starts at the PIN screen --------
+# Installs that predate it logged in automatically on tty1; take the user from there.
+autologin=/etc/systemd/system/getty@tty1.service.d/autologin.conf
+if [ -z "$user" ] && [ -f "$autologin" ]; then
+    user=$(sed -n 's/.*--autologin \([a-z_][a-z0-9_-]*\).*/\1/p' "$autologin" | head -n1)
+fi
+if [ -n "$user" ]; then
+    if ! [[ $user =~ ^[a-z_][a-z0-9_-]*$ ]] || ! getent passwd "$user" >/dev/null; then
+        echo "termos-system-setup: no such user: $user" >&2
+        exit 1
+    fi
+    for f in /usr/local/bin/termos-session /usr/local/bin/termos-lock /usr/local/bin/termos-pin \
+             /etc/systemd/system/termos-desktop@.service; do
+        [ -f "$f" ] || { echo "termos-system-setup: $f is missing" >&2; exit 1; }
+    done
+    # only take the old way in away once the new one is in place
+    systemctl enable "termos-desktop@$user.service" || exit 1
+    systemctl set-default graphical.target || exit 1
+
+    old_session=""
+    [ -n "$now" ] && old_session=$(systemctl show -p MainPID --value getty@tty1.service)
+    rm -f "$autologin"
+    rmdir "${autologin%/*}" 2>/dev/null
+    systemctl mask getty@tty1.service || exit 1
+
+    if [ -n "$now" ]; then
+        systemctl daemon-reload
+        # Converting a running desktop: whenever that session ends (say, "Restart
+        # desktop") the lock screen starts, instead of an empty console.
+        if [ "${old_session:-0}" -gt 0 ]; then
+            systemd-run --quiet --collect --unit=termos-session-handover \
+                /bin/sh -c "tail --pid=$old_session -f /dev/null; systemctl start termos-desktop@$user.service" || true
+        fi
+        echo "The device now starts at a PIN lock screen."
+        echo "At the next start you'll set the PIN, using your account password."
+    fi
+fi
+
+if [ -n "$now" ]; then
+    # picks up InhibitDelayMaxSec, so the lock screen has time to appear before sleep
+    systemctl kill -s HUP systemd-logind.service || true
+fi
 
 # boot splash (Plymouth) on installs that predate it: add the initramfs hook and
 # the kernel "splash" option, then rebuild the initramfs. Idempotent.

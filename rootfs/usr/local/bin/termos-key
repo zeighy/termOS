@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""termOS security-key jobs that talk to you in a terminal (PIN, then touch).
+
+  termos-key create [--store] [--pin] [--name NAME]   new SSH key held by the hardware key
+  termos-key import                                   bring in SSH keys stored on the key
+  termos-key fingerprints                             add a fingerprint (Bio keys)
+  termos-key reset                                    erase the key
+  termos-key codes                                    YubiKey one-time codes
+  termos-key card                                     what is on the smart card
+"""
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib", "termos"))
+from termosui import core, seckeys  # noqa: E402
+
+SSH_DIR = os.path.join(core.HOME, ".ssh")
+ACCENT, RESET = "\033[1;34m", "\033[0m"
+
+
+def say(text=""):
+    print(f"{ACCENT}{text}{RESET}" if text else "", flush=True)
+
+
+def yes(question):
+    return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+
+
+def wait_for_key():
+    keys = seckeys.find_keys()
+    if not keys:
+        say("Plug in your security key…")
+        while not keys:
+            time.sleep(0.5)
+            keys = seckeys.find_keys()
+        time.sleep(1)       # for udev to grant access
+    if len(keys) > 1:
+        say("More than one key is plugged in. Unplug the others and try again.")
+        return None
+    return keys[0]
+
+
+def free_path(stem):
+    path, n = os.path.join(SSH_DIR, stem), 1
+    while os.path.exists(path) or os.path.exists(path + ".pub"):
+        n += 1
+        path = os.path.join(SSH_DIR, f"{stem}-{n}")
+    return path
+
+
+def show_result(path):
+    print()
+    say("Done. The key file is")
+    print(f"  {path}")
+    if os.path.basename(path) in ("id_ed25519_sk", "id_ecdsa_sk"):
+        print("ssh uses it automatically for every host.")
+    else:
+        print("Choose it under Key when you edit a host in SSH Hosts.")
+    print("\nIts public key, for servers and websites:\n")
+    print(core.slurp(path + ".pub"))
+    print("\nTo put it on a machine: SSH Hosts > pencil > Copy key.")
+
+
+def create(a):
+    key = wait_for_key()
+    if not key:
+        return 1
+    try:
+        info = seckeys.describe(key["node"])
+    except seckeys.KeyProblem as e:
+        say(str(e))
+        return 1
+    if a.store or a.pin:
+        if not info.get("fido2") or not info.get("can_pin"):
+            say("This older key can't hold SSH keys or a PIN. Create it with both switches off.")
+            return 1
+        if not info["pin"]:
+            say("This key has no PIN yet. Set one in Settings > Security keys, then try again.")
+            return 1
+    name = re.sub(r"[^A-Za-z0-9_-]+", "-", a.name or "").strip("-")[:32]
+    os.makedirs(SSH_DIR, 0o700, exist_ok=True)
+    for kind in ("ed25519-sk", "ecdsa-sk"):
+        stem = "id_" + kind.replace("-", "_")
+        path = free_path(f"{stem}_{name}" if name else stem)
+        cmd = ["ssh-keygen", "-t", kind, "-N", "", "-f", path,
+               "-C", f"{os.environ.get('USER', 'user')}@{core.hostname()} (security key)"]
+        if a.store:
+            # stored keys are told apart by this name; the same one replaces the stored key
+            cmd += ["-O", "resident", "-O", f"application=ssh:{name or core.hostname()}"]
+        if a.pin:
+            cmd += ["-O", "verify-required"]
+        say("Enter the key's PIN if asked, then touch the key when it blinks.")
+        if subprocess.run(cmd).returncode == 0:
+            show_result(path)
+            return 0
+        if kind == "ecdsa-sk":
+            break
+        print()
+        if not yes("That didn't work. Older keys don't support Ed25519: try ECDSA instead?"):
+            break
+    say("No key was created.")
+    return 1
+
+
+def import_stored(_a):
+    key = wait_for_key()
+    if not key:
+        return 1
+    os.makedirs(SSH_DIR, 0o700, exist_ok=True)
+    have = {}
+    for name in sorted(os.listdir(SSH_DIR)):
+        if name.endswith(".pub"):
+            parts = core.slurp(os.path.join(SSH_DIR, name)).split()
+            if len(parts) > 1 and os.path.exists(os.path.join(SSH_DIR, name[:-4])):
+                have[parts[1]] = name[:-4]
+    added = []
+    tmp = tempfile.mkdtemp(prefix=".import-", dir=SSH_DIR)
+    try:
+        say("Enter the key's PIN, then touch the key if it blinks.")
+        if subprocess.run(["ssh-keygen", "-K", "-N", ""], cwd=tmp).returncode:
+            say("Couldn't read the key.")
+            return 1
+        for name in sorted(os.listdir(tmp)):
+            if name.endswith(".pub"):
+                continue
+            src = os.path.join(tmp, name)
+            parts = core.slurp(src + ".pub").split()
+            if len(parts) < 2:
+                continue
+            if parts[1] in have:
+                print(f"Already here: {have[parts[1]]}")
+                continue
+            # the first one gets the name ssh looks for by itself
+            default = "id_ed25519_sk" if "ed25519" in parts[0] else "id_ecdsa_sk"
+            plain = not os.path.exists(os.path.join(SSH_DIR, default))
+            dest = free_path(default if plain else re.sub(r"[^A-Za-z0-9._-]+", "-", name))
+            os.rename(src, dest)
+            os.rename(src + ".pub", dest + ".pub")
+            os.chmod(dest, 0o600)
+            added.append(dest)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if not added:
+        say("There are no new SSH keys on this security key. Only keys created with "
+            "'Keep it on the security key' can be brought in.")
+        return 0
+    for path in added:
+        show_result(path)
+    return 0
+
+
+def fingerprints(_a):
+    key = wait_for_key()
+    if not key:
+        return 1
+    say("Fingerprints already on the key:")
+    subprocess.run(["fido2-token", "-L", "-e", key["node"]])
+    print()
+    if not yes("Add a fingerprint?"):
+        return 0
+    say("Enter the PIN, then touch the sensor each time it asks.")
+    return subprocess.run(["fido2-token", "-S", "-e", key["node"]]).returncode
+
+
+def reset(_a):
+    key = wait_for_key()
+    if not key:
+        return 1
+    say(f"Reset {key['name']}")
+    print("This erases its PIN, every passkey and every SSH key that depends on it.")
+    print("Accounts that have only this key will lock you out. It can't be undone.\n")
+    if input("Type RESET to continue: ").strip() != "RESET":
+        say("Nothing was changed.")
+        return 0
+    say("Unplug the key now…")
+    while any(k["plugged"] == key["plugged"] for k in seckeys.find_keys()):
+        time.sleep(0.3)
+    if seckeys.find_keys():
+        say("Another key is plugged in, so nothing was reset. Unplug it and start again.")
+        return 1
+    say("…and plug it back in.")
+    while True:
+        keys = seckeys.find_keys()
+        if len(keys) > 1:
+            say("More than one key appeared, so nothing was reset.")
+            return 1
+        if keys:
+            break
+        time.sleep(0.3)
+    if keys[0]["name"] != key["name"]:
+        say("That's a different key, so nothing was reset.")
+        return 1
+    time.sleep(1)
+    say("Touch the key to confirm. It only allows this for 10 seconds.")
+    code = subprocess.run(["fido2-token", "-R", keys[0]["node"]]).returncode
+    say("The key is reset." if code == 0 else "The key was not reset. Try again, and touch it sooner.")
+    return code
+
+
+def release_card():
+    # gpg keeps hold of a card until its helper is stopped
+    subprocess.run(["gpgconf", "--kill", "scdaemon"], stderr=subprocess.DEVNULL)
+
+
+def codes(_a):
+    release_card()
+    while True:
+        say("YubiKey one-time codes")
+        if subprocess.run(["ykman", "oath", "accounts", "code"]).returncode:
+            print("\nThis needs a YubiKey with authenticator accounts on it.")
+            return 1
+        if input("\nEnter shows new codes, q closes: ").strip().lower() == "q":
+            return 0
+
+
+def card(_a):
+    release_card()
+    say("PIV and other certificate cards")
+    if subprocess.run(["pkcs11-tool", "--module", seckeys.PIV_MODULE, "-L"]).returncode:
+        print("No readable card.")
+    else:
+        say("\nKeys usable for SSH")
+        subprocess.run(["ssh-keygen", "-D", seckeys.PIV_MODULE])
+    say("\nOpenPGP card")
+    if subprocess.run(["gpg", "--card-status"]).returncode:
+        print("No OpenPGP card.")
+    release_card()
+    return 0
+
+
+JOBS = {"create": create, "import": import_stored, "fingerprints": fingerprints,
+        "reset": reset, "codes": codes, "card": card}
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="termos-key")
+    sub = ap.add_subparsers(dest="job", required=True)
+    for name in JOBS:
+        p = sub.add_parser(name)
+        if name == "create":
+            p.add_argument("--store", action="store_true")
+            p.add_argument("--pin", action="store_true")
+            p.add_argument("--name", default="")
+    a = ap.parse_args()
+    try:
+        code = JOBS[a.job](a)
+    except (KeyboardInterrupt, EOFError):
+        print()
+        say("Stopped.")
+        code = 1
+    if sys.stdin.isatty():
+        try:
+            input("\nPress Enter to close. ")
+        except (KeyboardInterrupt, EOFError):
+            pass
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
