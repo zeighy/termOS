@@ -5,6 +5,7 @@ SRC=/src
 OUT=/out
 WORK=/work
 PROFILE=$WORK/profile
+FLAVOR=${TERMOS_FLAVOR:-full}   # full: packages on the USB; online: downloads them
 
 echo "==> Updating container and installing archiso"
 sed -i 's/^#ParallelDownloads.*/ParallelDownloads = 8/' /etc/pacman.conf
@@ -27,6 +28,10 @@ file_permissions+=(["/usr/local/bin/termos-menu"]="0:0:755")
 file_permissions+=(["/usr/local/bin/termos-wifi"]="0:0:755")
 file_permissions+=(["/usr/local/bin/rotscr"]="0:0:755")
 PDEF
+if [[ $FLAVOR == online ]]; then
+    echo 'iso_name="termos-online"' >> "$PROFILE/profiledef.sh"
+    echo 'iso_application="termOS online install medium"' >> "$PROFILE/profiledef.sh"
+fi
 
 AIR=$PROFILE/airootfs
 # releng holds pacman-init (and the rest of boot) until internet time sync, with no
@@ -62,14 +67,18 @@ cat > "$AIR/etc/motd" <<'MOTD'
 
 MOTD
 
-echo "==> Downloading target packages into offline repo"
-REPO=$AIR/opt/termos/repo
-mkdir -p "$REPO" "$WORK/emptydb"
-mapfile -t PKGS < <(grep -Ev '^\s*(#|$)' "$SRC/packages.x86_64")
-# empty dbpath => pacman resolves the FULL dependency tree, not just what the container lacks
-pacman -Syw --noconfirm --dbpath "$WORK/emptydb" --cachedir "$REPO" "${PKGS[@]}" >/dev/null
-repo-add -q "$REPO/termos.db.tar.gz" "$REPO"/*.pkg.tar.zst
-echo "    $(ls "$REPO"/*.pkg.tar.zst | wc -l) packages, $(du -sh "$REPO" | cut -f1)"
+if [[ $FLAVOR == online ]]; then
+    echo "==> Online flavor: no packages on the USB (the installer downloads them)"
+else
+    echo "==> Downloading target packages into offline repo"
+    REPO=$AIR/opt/termos/repo
+    mkdir -p "$REPO" "$WORK/emptydb"
+    mapfile -t PKGS < <(grep -Ev '^\s*(#|$)' "$SRC/packages.x86_64")
+    # empty dbpath => pacman resolves the FULL dependency tree, not just what the container lacks
+    pacman -Syw --noconfirm --dbpath "$WORK/emptydb" --cachedir "$REPO" "${PKGS[@]}" >/dev/null
+    repo-add -q "$REPO/termos.db.tar.gz" "$REPO"/*.pkg.tar.zst
+    echo "    $(ls "$REPO"/*.pkg.tar.zst | wc -l) packages, $(du -sh "$REPO" | cut -f1)"
+fi
 
 echo "==> Building ISO (this takes a while)"
 mkarchiso -v -r -w "$WORK/mkarchiso" -o "$OUT" "$PROFILE" 2>&1 | grep -E '^\[mkarchiso\] (INFO|WARNING|ERROR)' || true

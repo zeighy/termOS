@@ -52,6 +52,16 @@ The ISO is the standard Arch live environment (`releng` profile) plus the
 termOS installer and an **offline copy of every package**, so installing does
 not need Wi-Fi.
 
+For a smaller USB that downloads everything while installing (so the device
+must be online: the menu's *Connect to Wi-Fi*, or a cable):
+
+```sh
+./build.sh --online
+# -> out/termos-online-YYYY.MM.DD-x86_64.iso   (~1 GB)
+```
+
+Its menu offers only the online install.
+
 Write it to a USB stick (replace `sdX`!):
 
 ```sh
