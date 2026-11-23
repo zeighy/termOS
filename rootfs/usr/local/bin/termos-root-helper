@@ -54,7 +54,16 @@ case "${1:-}" in
                  [[ $u =~ ^[a-z_][a-z0-9_-]*$ ]] && tailscale set --operator="$u" || true ;;
             off) tailscale down 2>/dev/null || true
                  systemctl disable --now tailscaled.service ;;
-            *) die "usage: tailscale on|off" ;;
+            exit-node)
+                ip=${3:-}
+                if [ "$ip" = none ]; then
+                    tailscale set --exit-node=
+                elif [[ $ip =~ ^100\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ || $ip =~ ^fd7a:115c:a1e0:[0-9a-f:]+$ ]]; then
+                    tailscale set --exit-node="$ip" --exit-node-allow-lan-access=true
+                else
+                    die "invalid exit node"
+                fi ;;
+            *) die "usage: tailscale on|off|exit-node <tailscale IP>|none" ;;
         esac ;;
     *) die "usage: ssh|hostname|timezone|powerkey|power|tailscale ..." ;;
 esac

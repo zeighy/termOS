@@ -23,7 +23,13 @@ SSH_CONFIG = os.path.join(SSH_DIR, "config")
 META = os.path.join(core.CFG, "hosts.json")
 CONN_DIR = os.path.join(core.RUN_DIR, "connections")
 FIELDS = {"hostname": "HostName", "user": "User", "port": "Port", "identityfile": "IdentityFile",
-          "pkcs11provider": "PKCS11Provider", "identityagent": "IdentityAgent"}
+          "pkcs11provider": "PKCS11Provider", "identityagent": "IdentityAgent",
+          "proxyjump": "ProxyJump", "forwardagent": "ForwardAgent"}
+# options that can appear many times; the form edits them as a list
+FORWARDS = {"localforward": "LocalForward", "remoteforward": "RemoteForward",
+            "dynamicforward": "DynamicForward"}
+# never accepted under "Other options": they would end or split the block
+NOT_EXTRA = {"host", "match", "include"}
 # choices for "Key" that aren't files
 PIV, OPENPGP = "card:piv", "card:openpgp"
 ALIAS_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}")
@@ -78,10 +84,16 @@ def ssh_hosts():
         for key, value, start, end in _blocks(lines):
             if key != "host":
                 continue
-            opts = {}
-            for line in lines[start + 1:end]:
+            opts, forwards, extra = {}, [], []
+            for line in lines[start + 1:_trim(lines, start, end)]:
                 k, v = _option(line)
-                if k and k not in opts:
+                if not k or line.lstrip().startswith("#"):
+                    continue
+                if k in FORWARDS:
+                    forwards.append((k, v))
+                elif k not in FIELDS:
+                    extra.append(line.strip())
+                if k not in opts:
                     opts[k] = v
             names = [n for n in value.split("#")[0].split() if not set(n) & set("*?!")]
             for name in names:
@@ -95,6 +107,9 @@ def ssh_hosts():
                     "identityfile": opts.get("identityfile", ""),
                     "pkcs11provider": opts.get("pkcs11provider", ""),
                     "identityagent": opts.get("identityagent", ""),
+                    "proxyjump": opts.get("proxyjump", ""),
+                    "forwardagent": opts.get("forwardagent", ""),
+                    "forwards": forwards, "extra": extra,
                     "proxied": "proxyjump" in opts or "proxycommand" in opts,
                     "editable": real == os.path.realpath(SSH_CONFIG) and len(value.split()) == 1,
                 })
@@ -135,9 +150,57 @@ def check_fields(old, name, f):
     port = f.get("port")
     if port and not (port.isdigit() and 0 < int(port) < 65536):
         return "The port is a number from 1 to 65535."
+    jump = f.get("proxyjump")
+    if jump and not re.fullmatch(r"[A-Za-z0-9._@:,%\[\]-]+", jump):
+        return "Write the jump host like me@bastion.example.com, or several separated by commas."
+    if f.get("forwardagent") not in (None, "", "yes", "no"):
+        return "Forward agent is yes or no."
     if any("\n" in v or "\r" in v or '"' in v for v in f.values()):
         return "Quotes and line breaks can't be used."
     return None
+
+
+def _port_ok(text):
+    return text.isdigit() and 0 < int(text) < 65536
+
+
+def check_forward(kind, listen, dest):
+    """An error message for one port forward, or None."""
+    m = re.fullmatch(r"(?:(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.*_-]+):)?(\d{1,5})", listen)
+    if not m or not _port_ok(m.group(2)):
+        return f"'{listen or '(empty)'}' isn't a port. Use a number like 8080, or 0.0.0.0:8080."
+    if kind == "dynamicforward":
+        return None
+    m = re.fullmatch(r"(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._%-]+):(\d{1,5})", dest)
+    if not m or not _port_ok(m.group(2)):
+        return f"'{dest or '(empty)'}' isn't an address. Write it as host:port, like localhost:80."
+    return None
+
+
+def split_forward(kind, value):
+    """('8080', 'localhost:80') from a LocalForward value."""
+    parts = value.split()
+    if kind == "dynamicforward" or len(parts) < 2:
+        return (parts[0] if parts else ""), ""
+    return parts[0], parts[1]
+
+
+def parse_extra(text):
+    """(lines, error) for the "Other options" box: one option per line."""
+    found = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, value = _option(line)
+        if not key or not value or not key[0].isalpha():
+            return None, f"'{line}' isn't an option. Write it as Name value, like ServerAliveInterval 30."
+        if key in NOT_EXTRA:
+            return None, f"{line.split()[0]} can't be used here. Edit ~/.ssh/config as text for that."
+        if key in FIELDS or key in FORWARDS:
+            return None, f"Set {line.split()[0]} with its own field above."
+        found.append(line)
+    return found, None
 
 
 def _write_config(lines):
@@ -155,15 +218,35 @@ def _find_block(lines, name):
     return None
 
 
-def save_host(old, name, fields):
-    """Add (old=None) or change a host. Returns an error message, or None."""
+def save_host(old, name, fields, forwards=None, extra=None):
+    """Add (old=None) or change a host. Returns an error message, or None.
+
+    forwards is [(kind, listen, dest)] and extra a list of option lines; None
+    leaves those lines of the file as they are."""
     problem = check_fields(old, name, fields)
     if problem:
         return problem
+    for kind, listen, dest in forwards or []:
+        problem = kind not in FORWARDS and "Unknown kind of forward." or check_forward(kind, listen, dest)
+        if problem:
+            return problem
+    if extra:
+        _lines, problem = parse_extra("\n".join(extra))
+        if problem:
+            return problem
     lines = core.slurp(SSH_CONFIG).splitlines()
 
     def fmt(key, value):
         return f'{FIELDS[key]} "{value}"' if " " in value else f"{FIELDS[key]} {value}"
+
+    # groups of lines that are replaced as a whole: (owns this option?, new lines)
+    groups = []
+    if forwards is not None:
+        groups.append((lambda k: k in FORWARDS,
+                       [f"{FORWARDS[k]} {listen}" + (f" {dest}" if dest else "")
+                        for k, listen, dest in forwards]))
+    if extra is not None:
+        groups.append((lambda k: k not in FIELDS and k not in FORWARDS, list(extra)))
 
     if old:
         where = _find_block(lines, old)
@@ -171,8 +254,18 @@ def save_host(old, name, fields):
             return "That host is no longer in ~/.ssh/config."
         start, end = where
         body, done = [], set()
+        placed = [False] * len(groups)
         for line in lines[start + 1:end]:
             key, value = _option(line)
+            mine = next((i for i, (owns, _n) in enumerate(groups)
+                         if key and not line.lstrip().startswith("#") and owns(key)), None)
+            if mine is not None:
+                # the new list goes where the first old line was
+                if not placed[mine]:
+                    placed[mine] = True
+                    indent = re.match(r"\s*", line).group(0) or "    "
+                    body += [indent + n for n in groups[mine][1]]
+                continue
             if key in fields and key in FIELDS and key not in done:
                 done.add(key)
                 if not fields[key]:
@@ -180,11 +273,15 @@ def save_host(old, name, fields):
                 if fields[key] != value:
                     line = re.match(r"\s*", line).group(0) + fmt(key, fields[key])
             body.append(line)
-        extra = ["    " + fmt(k, v) for k, v in fields.items() if v and k not in done]
+        added = ["    " + fmt(k, v) for k, v in fields.items() if v and k not in done]
+        for (_owns, new), was_placed in zip(groups, placed):
+            if not was_placed:
+                body += ["    " + n for n in new]
         head = lines[start] if old == name else f"Host {name}"
-        lines[start:end] = [head] + extra + body
+        lines[start:end] = [head] + added + body
     else:
         new = [f"Host {name}"] + ["    " + fmt(k, v) for k, v in fields.items() if v]
+        new += ["    " + n for _owns, group in groups for n in group]
         # ssh uses the first value it finds, so hosts go above "Host *" and Match blocks
         at = len(lines)
         for key, value, start, _end in _blocks(lines):

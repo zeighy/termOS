@@ -260,6 +260,24 @@ class TailscaleControls(Gtk.Box):
                                                               "termos-tailscale-login"))
         line.pack_start(self.login, False, False, 0)
         self.pack_start(line, False, False, 9)
+
+        # only shown once signed in and some machine offers itself as an exit node
+        self.exit_row = ui.hbox(12)
+        words = ui.vbox(2)
+        words.pack_start(ui.label("Exit node", "row-label"), False, False, 0)
+        self.exit_note = ui.label("Send internet traffic through another machine. "
+                                  "This network's printers and machines stay reachable", "sub", wrap=True)
+        words.pack_start(self.exit_note, False, False, 0)
+        self.exit_row.pack_start(words, True, True, 0)
+        self.exit_combo = ui.combo([], "")
+        self.exit_combo.set_valign(Gtk.Align.CENTER)
+        self.exit_combo.get_accessible().set_name("Exit node")
+        self.exit_combo.connect("changed", self.exit_chosen)
+        self.exit_row.pack_start(self.exit_combo, False, False, 0)
+        self.exit_row.set_no_show_all(True)
+        self.pack_start(self.exit_row, False, False, 9)
+        self.exit_shown = None      # (choices, current) on screen
+        self.exit_busy = False
         self.refresh()
         ui.every(self, 5, self.refresh)
 
@@ -280,6 +298,7 @@ class TailscaleControls(Gtk.Box):
         self.login.set_sensitive(self.on)
         if not self.on:
             self.state.set_text("Off. Uses no resources until you turn it on.")
+            self.show_exit_nodes(None)
             return
 
         def read():
@@ -299,8 +318,79 @@ class TailscaleControls(Gtk.Box):
             ips = (data.get("Self") or {}).get("TailscaleIPs") or []
             if data.get("BackendState") == "Running" and ips:
                 text += f"  ·  {ips[0]}"
+            via = next((p for p in (data.get("Peer") or {}).values() if p.get("ExitNode")), None)
+            if data.get("BackendState") == "Running" and via:
+                text += f"  ·  internet through {self.peer_name(via)}"
             self.state.set_text(text)
+            self.show_exit_nodes(data if data.get("BackendState") == "Running" else None)
         ui.background(read, show)
+
+    @staticmethod
+    def peer_name(peer):
+        return (peer.get("DNSName") or "").split(".")[0] or peer.get("HostName") or "?"
+
+    def show_exit_nodes(self, data):
+        if self.exit_busy:
+            return
+        choices, current = [("", "None")], ""
+        for p in ((data or {}).get("Peer") or {}).values():
+            ips = p.get("TailscaleIPs") or []
+            if not (p.get("ExitNodeOption") or p.get("ExitNode")) or not ips:
+                continue
+            choices.append((ips[0], self.peer_name(p) + ("" if p.get("Online") else " (offline)")))
+            if p.get("ExitNode"):
+                current = ips[0]
+        choices[1:] = sorted(choices[1:], key=lambda c: c[1].lower())
+        shape = (choices, current)
+        if shape == self.exit_shown:
+            return
+        self.exit_shown = shape
+        self.exit_busy = True       # filling the list isn't a choice
+        self.exit_combo.remove_all()
+        for value, text in choices:
+            self.exit_combo.append(value, text)
+        self.exit_combo.set_active_id(current)
+        self.exit_busy = False
+        visible = len(choices) > 1
+        self.exit_row.set_no_show_all(not visible)
+        if visible:
+            self.exit_row.show_all()
+        else:
+            self.exit_row.hide()
+
+    def exit_chosen(self, combo):
+        if self.exit_busy or self.exit_shown is None:
+            return
+        chosen = combo.get_active_id() or ""
+        if chosen == self.exit_shown[1]:
+            return
+        self.exit_busy = True
+        self.exit_combo.set_sensitive(False)
+        self.state.set_text("Changing the exit node…")
+
+        def work():
+            args = ["--exit-node=" + chosen]
+            if chosen:
+                args.append("--exit-node-allow-lan-access=true")
+            r = core.run("tailscale", "set", *args, timeout=20)
+            if r.returncode == 0:
+                return True, ""
+            # this user may not be Tailscale's operator yet
+            return core.root_helper("tailscale", "exit-node", chosen or "none")
+
+        def done(result):
+            if not self.alive:
+                return
+            self.exit_busy = False
+            self.exit_combo.set_sensitive(True)
+            ok, err = result or (False, "")
+            self.exit_shown = None      # redraw from what Tailscale says now
+            if not ok:
+                self.state.set_text(f"Couldn't change the exit node: {err or 'unknown error'}")
+                GLib.timeout_add_seconds(4, lambda: self.alive and self.refresh() and False)
+            else:
+                self.refresh()
+        ui.background(work, done)
 
 
 class PinChanger(Gtk.Box):
