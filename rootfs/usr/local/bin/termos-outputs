@@ -1,25 +1,37 @@
 #!/usr/bin/env python3
-"""termOS: resolution and scale for every screen (built-in or external).
+"""termOS: resolution, scale and arrangement for every screen (built-in or external).
 
-  termos-outputs apply    apply saved choices; screens without one get a scale
-                          that suits their size (about 150 % on 10" full-HD tablets)
+  termos-outputs apply [gate]  apply saved choices; screens without one get a scale
+                               that suits their size (about 150 % on 10" full-HD
+                               tablets), then arrange the screens
+  termos-outputs layout        only arrange the screens (after a rotation)
 
 ~/.config/termos/outputs.conf lines:  <output> <mode|auto> <scale|auto>
   HDMI-A-1 1920x1080@60.000Hz 1.25
   eDP-1    auto               auto
+~/.config/termos/layout.conf: the main screen and where the others sit (see screens.py)
+
+New app windows open on the main screen: a labwc window rule (marked
+termos-main-screen in rc.xml) moves them there. "gate" leaves rc.xml alone,
+because the boot gate runs its own labwc with its own config.
 """
 import math
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib", "termos"))
 from termosui import core, screens  # noqa: E402
 
+RC = os.path.join(core.HOME, ".config", "labwc", "rc.xml")
+MARK = "<!-- termos-main-screen -->"
 
-def apply():
+
+def apply_modes(outs):
     saved = screens.read_saved()
     legacy = core.read_conf(core.DISPLAY_CONF)      # older termOS kept the panel's scale here
-    for out in screens.connected():
+    changed = False
+    for out in outs:
         name = out["name"]
         mode, scale = saved.get(name, ("auto", "auto"))
         if scale == "auto" and name == legacy.get("PANEL") and legacy.get("SCALE"):
@@ -37,9 +49,70 @@ def apply():
             r = core.run("wlr-randr", "--output", name, *args)
             if r.returncode:
                 print(f"termos-outputs: {name}: {r.stderr.strip()}", file=sys.stderr)
+            changed = True
+    return changed
+
+
+def layout(outs):
+    """Place the screens; returns the main screen's name."""
+    saved_main, sides = screens.read_layout()
+    main = screens.main_screen(outs, saved_main)
+    if len(outs) < 2:
+        return main
+    places = screens.arrange(outs, main, sides)
+    args = []
+    for out in outs:
+        x, y = places[out["name"]]
+        now = out.get("position") or {}
+        if (now.get("x"), now.get("y")) != (x, y):
+            args += ["--output", out["name"], "--pos", f"{x},{y}"]
+    if args:
+        r = core.run("wlr-randr", *args)     # one call, so the screens move together
+        if r.returncode:
+            print(f"termos-outputs: arranging: {r.stderr.strip()}", file=sys.stderr)
+    return main
+
+
+def main_rule(main):
+    """Point the rc.xml window rule at the main screen (and add it on older installs)."""
+    try:
+        with open(RC, encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return
+    # no main screen (nothing connected?) -> a rule that matches no window
+    ident, target = ("*", main) if main else ("termos-main-off", "none")
+    line = (f'<windowRule identifier="{ident}" type="normal">'
+            f'<action name="MoveToOutput" output="{target}" /></windowRule>{MARK}')
+    if MARK in text:
+        new = re.sub(rf"^(\s*).*{re.escape(MARK)}$", lambda m: m.group(1) + line, text, flags=re.M)
+    elif "termos-maximize" in text:
+        # before the maximize rule, so a window is maximized on the screen it ends up on
+        new = re.sub(r"^(\s*)(.*termos-maximize.*)$", lambda m: f"{m.group(1)}{line}\n{m.group(1)}{m.group(2)}",
+                     text, count=1, flags=re.M)
+    elif "</windowRules>" in text:
+        new = text.replace("</windowRules>", f"  {line}\n  </windowRules>", 1)
+    else:
+        return
+    if new != text:
+        core.write_atomic(RC, new)
+        if os.environ.get("LABWC_PID"):
+            core.run("labwc", "--reconfigure")
+
+
+def main(argv):
+    if argv in ([], ["apply"], ["apply", "gate"]):
+        outs = screens.connected()
+        if apply_modes(outs):
+            outs = screens.connected()   # sizes changed
+        chosen = layout(outs)
+        if "gate" not in argv:
+            main_rule(chosen)
+    elif argv == ["layout"]:
+        layout(screens.connected())
+    else:
+        sys.exit("usage: termos-outputs apply [gate] | layout")
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] not in ([], ["apply"]):
-        sys.exit("usage: termos-outputs apply")
-    apply()
+    main(sys.argv[1:])

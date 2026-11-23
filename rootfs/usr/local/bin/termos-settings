@@ -16,6 +16,7 @@ import gi  # noqa: E402
 
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk  # noqa: E402
+from termosui.screenmap import ScreenMap  # noqa: E402
 
 WALLPAPER_DIRS = ["/usr/share/backgrounds/termos", os.path.join(core.HOME, "Pictures", "Wallpapers")]
 DEFAULT_WALLPAPER = "/usr/share/backgrounds/termos/default.png"
@@ -151,8 +152,8 @@ class Settings(Gtk.ApplicationWindow):
                 if auto.get_active():
                     core.run("termos-rotate", "lock")
                     core.spawn("termos-rotate", "auto")
-            p.row("Flip auto-rotate", ui.switch(dconf.get("SENSOR_OFFSET", "0") == "180", set_flip),
-                  "Turn on if auto-rotate shows the screen upside down")
+            p.row("Sensor mounted upside down", ui.switch(dconf.get("SENSOR_OFFSET", "0") == "180", set_flip),
+                  "A fix for tablets whose orientation sensor reads the wrong way round")
 
         p.section("Desktop")
         self.setting_switch(p, "MAXIMIZE", True, "Open apps full-screen",
@@ -191,16 +192,52 @@ class Settings(Gtk.ApplicationWindow):
         dlg.destroy()
         return resp == Gtk.ResponseType.OK
 
+    @staticmethod
+    def screen_title(out):
+        if screens.is_builtin(out):
+            return "Built-in screen"
+        return " ".join(x for x in (out.get("make"), out.get("model"))
+                        if x and x.lower() != "unknown") or "Screen"
+
+    def arrangement_ui(self, p, outs):
+        state = {"main": screens.main_screen(outs, screens.read_layout()[0])}
+
+        def current():
+            items = []
+            for o in screens.connected():
+                pos = o.get("position") or {}
+                items.append((o["name"], self.screen_title(o).replace(" screen", ""),
+                              pos.get("x", 0), pos.get("y", 0), *screens.logical_size(o)))
+            return items
+
+        def rearrange(main, rects):
+            screens.save_layout(main, screens.sides_from(rects, main))
+            r = core.run("termos-outputs", "apply")
+            if r.returncode:
+                self.failed("the screen arrangement", r.stderr.strip())
+            state["main"] = main
+            smap.set_screens(current(), main)
+
+        def on_main(new):
+            if new and new != state["main"]:
+                rearrange(new, {n: (x, y, w, h) for n, _l, x, y, w, h in current()})
+
+        p.section("Arrangement")
+        smap = ScreenMap(current(), state["main"], lambda rects: rearrange(state["main"], rects))
+        p.add(smap)
+        p.note("Drag a screen to where it sits on your desk.")
+        p.row("Main screen", ui.combo([(o["name"], f"{self.screen_title(o)} ({o['name']})") for o in outs],
+                                      state["main"], on_main),
+              "New apps open here")
+
     def screens_ui(self, p):
         outs = screens.connected()
         saved = screens.read_saved()
+        if len(outs) > 1:
+            self.arrangement_ui(p, outs)
         for out in outs:
             name = out.get("name", "?")
-            if screens.is_builtin(out):
-                title = "Built-in screen"
-            else:
-                title = " ".join(x for x in (out.get("make"), out.get("model"))
-                                 if x and x.lower() != "unknown") or "Screen"
+            title = self.screen_title(out)
             p.section(f"{title} ({name})")
             self.screen_rows(p, out, name, saved.get(name, ("auto", "auto")))
         if not outs:

@@ -38,7 +38,10 @@
     <!-- App windows open maximized, so they shrink above the on-screen
          keyboard instead of being covered by it. Dialogs are not affected.
          Toggled by Settings > Display > "Open apps full-screen"
-         (see termos-apply-settings). -->
+         (see termos-apply-settings).
+         The first rule opens apps on the main screen (Settings > Display >
+         Arrangement); termos-outputs fills in the screen's name. -->
+    <windowRule identifier="termos-main-off" type="normal"><action name="MoveToOutput" output="none" /></windowRule><!-- termos-main-screen -->
     <windowRule identifier="*" type="normal"><action name="Maximize" /></windowRule><!-- termos-maximize -->
   </windowRules>
 
