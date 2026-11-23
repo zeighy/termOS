@@ -10,24 +10,6 @@ repos, so the whole system is updated with
 sudo pacman -Syu
 ```
 
-## Download
-
-Get the installer ISO from [Releases](https://github.com/zeighy/termOS/releases).
-GitHub limits a release file to 2 GB, so the ISO (about 2.4 GB) comes in two
-parts. Join them and check the result against `SHA256SUMS`:
-
-```sh
-cat termos-*.iso.part1 termos-*.iso.part2 > termos.iso    # Linux / macOS
-sha256sum termos.iso                                     # compare with SHA256SUMS
-```
-
-On Windows: `copy /b termos-VERSION-x86_64.iso.part1 + termos-VERSION-x86_64.iso.part2 termos.iso`
-(`certutil -hashfile termos.iso SHA256` prints the checksum).
-
-Then write `termos.iso` to a USB stick of 4 GB or more, as a raw image: `dd` (see
-[Building the ISO](#building-the-iso)), balenaEtcher, or Rufus in *DD image* mode.
-The stick is erased. Or [build the ISO yourself](#building-the-iso).
-
 ## What's in it
 
 | Part              | Package                                      |
