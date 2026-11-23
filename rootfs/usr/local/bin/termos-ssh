@@ -19,7 +19,23 @@ CSS = """
 .host-card .name {{ font-size: 18px; font-weight: bold; }}
 .host-card .icon.big {{ font-size: 28px; }}
 .dot {{ font-size: 15px; }}
+.forward {{ padding: 6px 0; }}
+.options-box {{ background-color: {mantle}; border: 1px solid {hover}; border-radius: 12px; padding: 10px 12px; }}
+textview.options, textview.options text {{ font-family: monospace; background-color: transparent; color: {text}; }}
 """
+FORWARD_KINDS = [("localforward", "Server port here"), ("remoteforward", "My port on server"),
+                 ("dynamicforward", "SOCKS proxy")]
+
+
+def forward_words(kind, listen, dest):
+    """What a forward does, in plain words."""
+    listen = listen or "…"
+    if kind == "dynamicforward":
+        return f"Apps here can use localhost:{listen} as a SOCKS proxy that browses from the server."
+    if kind == "remoteforward":
+        return f"Port {listen} on the server reaches {dest or '…'} as seen from this device."
+    return f"localhost:{listen} here reaches {dest or '…'} as seen from the server."
+
 TEMPLATE = """# SSH hosts - each "Host" entry appears in termOS "SSH Hosts" and on the home screen.
 # Example (remove the # signs):
 #
@@ -196,7 +212,9 @@ class Window(Gtk.ApplicationWindow):
         state = ui.hbox(6)
         if word[0]:
             state.pack_start(ui.label("●", "dot", word[1]), False, False, 0)
-        bits = [word[0], used, "resumes tmux" if opts["tmux"] else "", "mosh" if opts["mosh"] else ""]
+        n = len(host.get("forwards") or [])
+        bits = [word[0], used, "resumes tmux" if opts["tmux"] else "", "mosh" if opts["mosh"] else "",
+                f"{n} forward{'s' if n != 1 else ''}" if n else ""]
         state.pack_start(ui.label("  ·  ".join(x for x in bits if x), "sub", ellipsize=True), False, False, 0)
         words.pack_start(state, False, False, 0)
         inner.pack_start(words, True, True, 0)
@@ -312,6 +330,42 @@ class Window(Gtk.ApplicationWindow):
         p.row("My public key", ui.button("Copy text", self.copy_public_key),
               "To paste into a server or website")
 
+        p.section("Port forwarding")
+        self.forward_box = ui.vbox(0)
+        p.add(self.forward_box)
+        self.forward_rows = []
+        self.forwards_before = [(k, *hosts.split_forward(k, v)) for k, v in values.get("forwards", [])]
+        for forward in self.forwards_before:
+            self.add_forward(*forward)
+        add = ui.button("Add forward", lambda: self.add_forward("localforward", "", "", True),
+                        icon_name="plus")
+        add.set_sensitive(self.editable)
+        add.set_halign(Gtk.Align.START)
+        p.add(add)
+        p.note("Forwards are open while the connection is. Mosh can't carry them, "
+               "so turn mosh off for a host that uses them.")
+
+        p.section("Advanced")
+        self.jump = Gtk.Entry(text=values.get("proxyjump", ""), placeholder_text="none")
+        self.jump.set_width_chars(16)
+        self.jump.set_sensitive(self.editable)
+        p.row("Jump host", self.jump, "Connect through another machine first, like me@bastion")
+        self.agent_before = values.get("forwardagent", "").lower() == "yes"
+        self.agent = Gtk.Switch(active=self.agent_before)
+        self.agent.set_sensitive(self.editable)
+        p.row("Forward my keys", self.agent,
+              "The server can use your SSH agent to log in further. Only for machines you trust")
+        p.row("Other options", None, "One per line, as in ~/.ssh/config, like ServerAliveInterval 30")
+        self.extra_before = "\n".join(values.get("extra", []))
+        self.extra = ui.classes(Gtk.TextView(wrap_mode=Gtk.WrapMode.CHAR, accepts_tab=False), "options")
+        self.extra.get_buffer().set_text(self.extra_before)
+        self.extra.set_size_request(-1, 80)
+        self.extra.set_sensitive(self.editable)
+        self.extra.get_accessible().set_name("Other options")
+        frame = ui.vbox(0, "options-box")
+        frame.pack_start(self.extra, True, True, 0)
+        p.add(frame)
+
         self.ssh_only = p.box.get_children()[start:]
 
         if host and self.editable:
@@ -323,6 +377,64 @@ class Window(Gtk.ApplicationWindow):
         self.stack.set_visible_child_name("form")
         if not host:
             self.fields["name"].grab_focus()
+
+    def add_forward(self, kind, listen, dest, focus=False):
+        box = ui.vbox(4, "forward")
+        line = ui.hbox(8)
+        kinds = ui.combo(FORWARD_KINDS, kind)
+        port = Gtk.Entry(text=listen, placeholder_text="8080")
+        port.set_width_chars(6)
+        port.set_input_purpose(Gtk.InputPurpose.DIGITS)
+        port.get_accessible().set_name("Port")
+        arrow = ui.label("→")
+        target = Gtk.Entry(text=dest, placeholder_text="localhost:80")
+        target.set_width_chars(10)
+        target.get_accessible().set_name("Goes to")
+        # shown or hidden by update(), whatever show_all() does later
+        arrow.set_no_show_all(True)
+        target.set_no_show_all(True)
+        remove = ui.button(None, None, "flat", "round", icon_name="close", tip="Remove forward")
+        line.pack_start(kinds, False, False, 0)
+        line.pack_start(port, False, False, 0)
+        line.pack_start(arrow, False, False, 0)
+        line.pack_start(target, True, True, 0)
+        line.pack_end(remove, False, False, 0)
+        words = ui.label("", "sub", wrap=True)
+        box.pack_start(line, False, False, 0)
+        box.pack_start(words, False, False, 0)
+        row = {"kind": kinds, "listen": port, "dest": target}
+
+        def update(*_a):
+            k = kinds.get_active_id()
+            arrow.set_visible(k != "dynamicforward")
+            target.set_visible(k != "dynamicforward")
+            words.set_text(forward_words(k, port.get_text().strip(), target.get_text().strip()))
+
+        def drop():
+            self.forward_rows.remove(row)
+            box.destroy()
+        kinds.connect("changed", update)
+        port.connect("changed", update)
+        target.connect("changed", update)
+        remove.connect("clicked", lambda _b: drop())
+        for w in (kinds, port, target, remove):
+            w.set_sensitive(self.editable)
+        self.forward_rows.append(row)
+        self.forward_box.pack_start(box, False, False, 0)
+        box.show_all()
+        update()
+        if focus:
+            port.grab_focus()
+
+    def forward_values(self):
+        found = []
+        for row in self.forward_rows:
+            kind = row["kind"].get_active_id()
+            listen, dest = row["listen"].get_text().strip(), row["dest"].get_text().strip()
+            if not listen and not dest:
+                continue        # an empty row added and never filled in
+            found.append((kind, listen, "" if kind == "dynamicforward" else dest))
+        return found
 
     def kind_changed(self, kind):
         self.kind = kind
@@ -362,12 +474,28 @@ class Window(Gtk.ApplicationWindow):
         if self.editable:
             values = {k: e.get_text().strip() for k, e in self.fields.items() if k != "name"}
             values.update(hosts.key_fields(self.host, self.key_combo.get_active_id() or ""))
-            problem = hosts.save_host(self.editing, name, values)
+            jump = self.jump.get_text().strip()
+            if jump != self.host.get("proxyjump", ""):
+                values["proxyjump"] = jump
+            if self.agent.get_active() != self.agent_before:
+                values["forwardagent"] = "yes" if self.agent.get_active() else ""
+            buf = self.extra.get_buffer()
+            text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
+            extra, problem = hosts.parse_extra(text)
+            forwards = self.forward_values()
+            if not problem:
+                problem = hosts.save_host(
+                    self.editing, name, values,
+                    forwards=None if forwards == self.forwards_before else forwards,
+                    extra=None if text.strip() == self.extra_before.strip() else extra)
             if problem:
                 self.error.set_text(problem)
                 return False
             self.editing = name
             self.host = next((h for h in hosts.ssh_hosts() if h["name"] == name), {})
+            self.agent_before = self.host.get("forwardagent", "").lower() == "yes"
+            self.forwards_before = [(k, *hosts.split_forward(k, v)) for k, v in self.host.get("forwards", [])]
+            self.extra_before = "\n".join(self.host.get("extra", []))
         hosts.set_meta(name, **{k: s.get_active() for k, s in self.options.items()})
         self.error.set_text("")
         return True

@@ -270,8 +270,12 @@ mosh for a host to keep the session itself.
   (`user@host` or `user@host:port`). *Add host* and the pencil edit hosts
   without touching the file (comments and other options are preserved; the
   previous file is kept as `config.termos-bak`). Per host: *Resume where I
-  left off* (tmux), *Reconnect automatically*, *mosh*. The editor can also
-  create a key and copy it to the host. *Add host* also makes RDP and VNC
+  left off* (tmux), *Reconnect automatically*, *mosh*. *Port forwarding*
+  adds `LocalForward` (a server port reachable here), `RemoteForward` (a port
+  here reachable from the server) and `DynamicForward` (SOCKS proxy) lines;
+  they're up while the connection is (not with mosh). *Advanced* sets a jump
+  host (`ProxyJump`), agent forwarding, and any other `ssh_config` options,
+  one per line. The editor can also create a key and copy it to the host. *Add host* also makes RDP and VNC
   connections (saved as Remmina profiles), and with Tailscale on, *From
   Tailscale* fills in a machine from your tailnet.
 * **Screenshots**: `Print` (whole screen), `Shift+Print` (area), or the
@@ -283,6 +287,9 @@ mosh for a host to keep the session itself.
   login page in Chromium. It's off by default and uses no resources until
   enabled. Tailnet machines aren't listed on their own: add the ones you use
   with *Add host › From Tailscale*, then set their user and key like any host.
+  Once signed in, *Exit node* lists the tailnet machines that offer
+  themselves as one; picking one sends internet traffic through it, while
+  the local network (printers, LAN hosts) stays reachable.
 
 ### Security keys, passkeys and smart cards
 
