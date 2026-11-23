@@ -411,7 +411,7 @@ sed -i 's/relatime/noatime/' "$MNT/etc/fstab"
 cp -a "$ROOTFS/." "$MNT/"
 chmod 0440 "$MNT"/etc/sudoers.d/*
 cp "$TERMOS/version" "$MNT/etc/termos/version" 2>/dev/null || true
-chmod 0755 "$MNT"/usr/local/bin/termos-*
+chmod 0755 "$MNT"/usr/local/bin/*   # archiso resets the modes of files on the ISO
 
 # pacman mirror for updates (installed system uses the normal Arch repos)
 if grep -q '^Server' /etc/pacman.d/mirrorlist 2>/dev/null; then
