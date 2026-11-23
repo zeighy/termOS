@@ -11,6 +11,7 @@ CFG = os.path.join(HOME, ".config", "termos")
 SETTINGS_CONF = os.path.join(CFG, "settings.conf")
 DISPLAY_CONF = os.path.join(CFG, "display.conf")
 OUTPUTS_CONF = os.path.join(CFG, "outputs.conf")
+LAYOUT_CONF = os.path.join(CFG, "layout.conf")
 RUN_DIR = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}", "termos")
 ROOT_HELPER = "/usr/local/bin/termos-root-helper"
 PIN_HELPER = "/usr/local/bin/termos-pin"

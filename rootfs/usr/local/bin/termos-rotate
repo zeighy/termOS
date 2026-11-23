@@ -24,6 +24,8 @@ apply() {
     local deg=$(( (BASE + ROT) % 360 )) t
     case $deg in 0) t=normal ;; *) t=$deg ;; esac
     wlr-randr --output "$PANEL" --transform "$t"
+    # turning the panel changes its shape: put the other screens back against it
+    if [ "$(wlr-randr | grep -c '^[^ ]')" -gt 1 ]; then termos-outputs layout; fi
 }
 daemon_running() {
     [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null

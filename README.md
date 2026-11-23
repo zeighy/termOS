@@ -206,7 +206,7 @@ Open it from Quick Settings (⚙) or the apps tray.
 
 | Page        | What you can change |
 |-------------|---------------------|
-| Display     | brightness; **resolution and scale (automatic, or 100–300 %) for every connected screen**; auto-rotate, rotate, flip auto-rotate; open apps full-screen; home screen on/off |
+| Display     | brightness; **resolution and scale (automatic, or 100–300 %) for every connected screen**; **screen arrangement (drag on a map) and main screen, where new apps open**; auto-rotate, rotate, sensor-upside-down fix; open apps full-screen; home screen on/off |
 | Power       | power mode, battery health, automatic battery saver, dim / screen-off / sleep timers, power button |
 | Lock screen | change PIN, lock when the screen turns off, lock now |
 | Security keys | key PIN, passkeys on the key, SSH keys on hardware, phone passkeys, smart cards |

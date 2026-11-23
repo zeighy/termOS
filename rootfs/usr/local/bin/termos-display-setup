@@ -10,7 +10,7 @@ conf="$HOME/.config/termos/display.conf"
 rc="$HOME/.config/labwc/rc.xml"
 
 for _ in 1 2 3 4 5 6 7 8 9 10; do wlr-randr >/dev/null 2>&1 && break; sleep 0.3; done
-termos-outputs apply
+termos-outputs apply ${1:+"$1"}
 panel=$(wlr-randr | awk '/^[^ \t]/{print $1}' | grep -E '^(eDP|DSI|LVDS)' | head -n1)
 [ -n "$panel" ] || exit 0   # no built-in screen (desktop PC): nothing to do
 
@@ -25,7 +25,13 @@ if [ ! -f "$conf" ]; then
         $1==p {f=1; next} /^[^ \t]/ {f=0}
         f && / px/ && /current/ {split($1,a,"x"); print a[1], a[2]; exit}')
     base=0
-    [ -n "$w" ] && [ -n "$h" ] && [ "$w" -lt "$h" ] && base=90
+    if [ -n "$w" ] && [ -n "$h" ] && [ "$w" -lt "$h" ]; then
+        # most portrait-native tablet panels are mounted turned left; these turned right
+        case $(cat /sys/class/dmi/id/product_version 2>/dev/null) in
+            "Lenovo Tablet 10") base=270 ;;
+            *) base=90 ;;
+        esac
+    fi
     mkdir -p "${conf%/*}"
     cat > "$conf" <<CONF
 # termOS display settings (edit freely; re-login to apply)
