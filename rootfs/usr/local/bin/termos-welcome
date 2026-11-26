@@ -52,7 +52,7 @@ class Welcome(Gtk.ApplicationWindow):
         self.holder.show_all()
         last = len(self.steps) - 1
         self.back_btn.set_sensitive(self.at > 0)
-        self.next_btn.get_child().get_children()[0].set_text("Done" if self.at == last else "Next")
+        self.next_btn.label_widget.set_text("Done" if self.at == last else "Next")
         self.progress.set_text(f"{self.at + 1} of {len(self.steps)}")
 
     @staticmethod

@@ -71,6 +71,9 @@ apply() {
     mkdir -p /etc/NetworkManager/conf.d
     printf '[connection]\n# 3 = power saving on, 2 = off (set by termos-power-profile)\nwifi.powersave = %s\n' \
         "$([ "$wifi" = on ] && echo 3 || echo 2)" > /etc/NetworkManager/conf.d/termos-wifi-powersave.conf
+    if command -v nmcli >/dev/null && systemctl is-active --quiet NetworkManager.service 2>/dev/null; then
+        nmcli general reload conf >/dev/null 2>&1 || true
+    fi
     if command -v iw >/dev/null; then
         local dev
         for dev in /sys/class/net/*/wireless; do

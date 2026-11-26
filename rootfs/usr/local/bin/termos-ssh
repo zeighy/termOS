@@ -76,9 +76,11 @@ class Window(Gtk.ApplicationWindow):
         self.set_default_size(720, 640)
         self.set_icon_name("network-server")
         self.hosts = []
+        self.remotes = []
         self.online = {}
         self.drawn = None
         self.editing = None
+        self.editing_remote = None
         self.alive = True
         self.connect("destroy", self.gone)
         self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
@@ -148,6 +150,11 @@ class Window(Gtk.ApplicationWindow):
         self.quick_error.set_no_show_all(True)
         box.pack_start(self.quick_error, False, False, 0)
 
+        self.filter_entry = Gtk.SearchEntry(placeholder_text="Filter hosts")
+        self.filter_entry.connect("search-changed", lambda _e: self.draw())
+        self.filter_entry.set_no_show_all(True)
+        box.pack_start(self.filter_entry, False, False, 0)
+
         self.cards = ui.vbox(8)
         box.pack_start(self.cards, False, False, 4)
         box.pack_start(ui.button("Edit ~/.ssh/config as text", self.edit_file, "flat", icon_name="edit"),
@@ -156,10 +163,11 @@ class Window(Gtk.ApplicationWindow):
 
     def reload(self):
         self.hosts = hosts.ssh_hosts()
+        self.remotes = hosts.remote_desktops()
         self.draw()
 
     def probe(self):
-        items = list(self.hosts)
+        items = list(self.hosts) + list(self.remotes)
 
         def done(result):
             if self.alive:
@@ -167,10 +175,22 @@ class Window(Gtk.ApplicationWindow):
                 self.draw()
         ui.background(lambda: hosts.probe(items), done)
 
+    def _matches(self, m, query):
+        if not query:
+            return True
+        hay = " ".join(str(m.get(k) or "") for k in ("name", "host", "user", "protocol")).lower()
+        return all(w in hay for w in query.split())
+
     def draw(self):
         meta, live = hosts.all_meta(), hosts.connections()
-        shape = []
+        query = self.filter_entry.get_text().strip().lower()
+        total = len(self.hosts) + len(self.remotes)
+        self.filter_entry.set_visible(total >= 4 or bool(query))
+
+        ssh_shape = []
         for h in self.hosts:
+            if not self._matches(h, query):
+                continue
             opts = hosts.options(h["name"], meta)
             key = hosts.machine_key(h)
             state = live.get(h["name"])
@@ -184,18 +204,44 @@ class Window(Gtk.ApplicationWindow):
                 word = ("Offline", "error")
             else:
                 word = ("", None)
-            shape.append((h, opts, word, hosts.ago(opts["used"])))
+            ssh_shape.append((h, opts, word, hosts.ago(opts["used"])))
+
+        rem_shape = []
+        for r in self.remotes:
+            if not self._matches(r, query):
+                continue
+            key = hosts.machine_key(r)
+            used = hosts.ago(meta.get(key, {}).get("used", 0))
+            if self.online.get(key) is True:
+                word = ("Online", "good")
+            elif self.online.get(key) is False:
+                word = ("Offline", "error")
+            else:
+                word = ("", None)
+            rem_shape.append((r, word, used))
+
+        shape = (ssh_shape, rem_shape, query)
         if shape == self.drawn:
             return
         self.drawn = shape
         ui.clear(self.cards)
-        for item in shape:
+        for item in ssh_shape:
             self.cards.pack_start(self.card(*item), False, False, 0)
-        if not shape:
-            self.cards.pack_start(ui.empty_state(
-                "server", "No hosts yet",
-                "Add a machine once and it's one tap from here and from the home screen.",
-                ui.button("Add your first host", lambda: self.show_form(None), "primary")), False, False, 0)
+        if rem_shape:
+            head = ui.label("Remote desktops", "heading")
+            head.set_margin_top(10 if ssh_shape else 0)
+            self.cards.pack_start(head, False, False, 2)
+            for item in rem_shape:
+                self.cards.pack_start(self.remote_card(*item), False, False, 0)
+        if not ssh_shape and not rem_shape:
+            if query:
+                self.cards.pack_start(ui.label("No hosts match your filter.", "sub", xalign=0.5),
+                                      False, False, 16)
+            else:
+                self.cards.pack_start(ui.empty_state(
+                    "server", "No hosts yet",
+                    "Add a machine once and it's one tap from here and from the home screen.",
+                    ui.button("Add your first host", lambda: self.show_form(None), "primary")), False, False, 0)
         self.cards.show_all()
 
     def card(self, host, opts, word, used):
@@ -213,7 +259,9 @@ class Window(Gtk.ApplicationWindow):
         if word[0]:
             state.pack_start(ui.label("●", "dot", word[1]), False, False, 0)
         n = len(host.get("forwards") or [])
-        bits = [word[0], used, "resumes tmux" if opts["tmux"] else "", "mosh" if opts["mosh"] else "",
+        bits = [word[0], used, "tunnel" if opts.get("tunnel") else "",
+                "resumes tmux" if opts["tmux"] and not opts.get("tunnel") else "",
+                "mosh" if opts["mosh"] and not opts.get("tunnel") else "",
                 f"{n} forward{'s' if n != 1 else ''}" if n else ""]
         state.pack_start(ui.label("  ·  ".join(x for x in bits if x), "sub", ellipsize=True), False, False, 0)
         words.pack_start(state, False, False, 0)
@@ -222,8 +270,37 @@ class Window(Gtk.ApplicationWindow):
         b.get_accessible().set_name(f"Connect to {host['name']}")
         b.connect("clicked", lambda _b: hosts.connect(host))
         line.pack_start(b, True, True, 0)
+        line.pack_start(ui.button(None, lambda: hosts.browse_sftp(host), "flat", "round",
+                                  icon_name="folder", tip=f"Browse files on {host['name']} (SFTP)"), False, False, 0)
         line.pack_start(ui.button(None, lambda: self.show_form(host), "flat", "round",
                                   icon_name="edit", tip=f"Edit {host['name']}"), False, False, 0)
+        return line
+
+    def remote_card(self, remote, word, used):
+        line = ui.hbox(4, "host-card")
+        b = ui.classes(Gtk.Button(), "connect")
+        inner = ui.hbox(14)
+        inner.pack_start(ui.icon("remote", "big", "accent"), False, False, 0)
+        words = ui.vbox(3)
+        words.pack_start(ui.label(remote["name"], "name", ellipsize=True), False, False, 0)
+        addr = (remote["user"] + "@" if remote["user"] else "") + remote["host"]
+        default_port = {"RDP": "3389", "VNC": "5900"}.get(remote["protocol"], "")
+        if remote["port"] and remote["port"] != default_port:
+            addr += ":" + remote["port"]
+        words.pack_start(ui.label(f"{remote['protocol']}  ·  {addr}", "sub", ellipsize=True), False, False, 0)
+        state = ui.hbox(6)
+        if word[0]:
+            state.pack_start(ui.label("●", "dot", word[1]), False, False, 0)
+        state.pack_start(ui.label("  ·  ".join(x for x in (word[0], used) if x), "sub", ellipsize=True),
+                         False, False, 0)
+        words.pack_start(state, False, False, 0)
+        inner.pack_start(words, True, True, 0)
+        b.add(inner)
+        b.get_accessible().set_name(f"Connect to {remote['name']}")
+        b.connect("clicked", lambda _b: hosts.connect(remote))
+        line.pack_start(b, True, True, 0)
+        line.pack_start(ui.button(None, lambda: self.show_form(remote), "flat", "round",
+                                  icon_name="edit", tip=f"Edit {remote['name']}"), False, False, 0)
         return line
 
     def quick_connect(self):
@@ -256,8 +333,10 @@ class Window(Gtk.ApplicationWindow):
         self.probe()
 
     def show_form(self, host):
-        self.editing = host["name"] if host else None
-        self.editable = host is None or host["editable"]
+        is_remote = bool(host and host.get("kind") == "remote")
+        self.editing = None if is_remote else (host["name"] if host else None)
+        self.editing_remote = host["path"] if is_remote else None
+        self.editable = True if is_remote else (host is None or host["editable"])
         ui.clear(self.form_holder)
         p = ui.Page(760)
 
@@ -272,7 +351,8 @@ class Window(Gtk.ApplicationWindow):
         p.box.pack_start(self.error, False, False, 4)
 
         p.section("Machine")
-        self.kind, self.peer_row = "ssh", None
+        self.kind = (host.get("protocol") or "RDP") if is_remote else "ssh"
+        self.peer_row = None
         if not host:
             p.row("Type", ui.combo([("ssh", "SSH (terminal)"), ("RDP", "Remote desktop (RDP)"),
                                     ("VNC", "VNC")], "ssh", self.kind_changed))
@@ -282,13 +362,17 @@ class Window(Gtk.ApplicationWindow):
             self.peer_row = p.row("From Tailscale", self.peer_combo, "Fills in the name and address")
             self.peer_row.set_no_show_all(True)
             ui.background(hosts.tailscale_peers, self.got_peers)
+        elif is_remote:
+            p.row("Type", ui.combo([("RDP", "Remote desktop (RDP)"), ("VNC", "VNC")],
+                                   self.kind if self.kind in ("RDP", "VNC") else "RDP",
+                                   lambda k: setattr(self, "kind", k)))
         self.fields = {}
         values = host or {}
         for key, title, hint, value in (
             ("name", "Name", "nas", values.get("name", "")),
             ("hostname", "Address", "192.168.1.10", values.get("host", "")),
-            ("user", "User", "same as here", values.get("user", "")),
-            ("port", "Port", "22", values.get("port", "")),
+            ("user", "User", "" if is_remote else "same as here", values.get("user", "")),
+            ("port", "Port", {"RDP": "3389", "VNC": "5900"}.get(self.kind, "22"), values.get("port", "")),
         ):
             e = Gtk.Entry(text=value, placeholder_text=hint)
             e.set_width_chars(16)
@@ -309,10 +393,18 @@ class Window(Gtk.ApplicationWindow):
             ("tmux", "Resume where I left off", "Opens the same tmux session each time (needs tmux there)"),
             ("reconnect", "Reconnect automatically", "After sleep or a dropped network"),
             ("mosh", "Use mosh", "Survives sleep and Wi-Fi changes (needs mosh there)"),
+            ("tunnel", "Tunnel only (no shell)", "Keeps port forwards open without opening a shell (ssh -N)"),
         ):
             s = Gtk.Switch(active=opts[key])
+            if key in ("mosh", "tunnel"):
+                s.connect("notify::active", lambda *_a: self.update_mosh_warning())
             self.options[key] = s
             p.row(title, s, sub)
+        self.mosh_warn = ui.label(
+            "Mosh cannot carry port forwards or tunnel-only mode. Turn mosh off to use them.",
+            "warn", "sub", wrap=True)
+        self.mosh_warn.set_no_show_all(True)
+        p.add(self.mosh_warn)
 
         p.section("SSH key")
         self.host = values
@@ -342,8 +434,7 @@ class Window(Gtk.ApplicationWindow):
         add.set_sensitive(self.editable)
         add.set_halign(Gtk.Align.START)
         p.add(add)
-        p.note("Forwards are open while the connection is. Mosh can't carry them, "
-               "so turn mosh off for a host that uses them.")
+        p.note("Forwards are open while the connection is. Turn on Tunnel only above to forward ports without a shell.")
 
         p.section("Advanced")
         self.jump = Gtk.Entry(text=values.get("proxyjump", ""), placeholder_text="none")
@@ -374,9 +465,21 @@ class Window(Gtk.ApplicationWindow):
 
         self.form_holder.pack_start(p.widget, True, True, 0)
         self.form_holder.show_all()
+        if is_remote:
+            for w in self.ssh_only:
+                w.set_visible(False)
+        else:
+            self.update_mosh_warning()
         self.stack.set_visible_child_name("form")
         if not host:
             self.fields["name"].grab_focus()
+
+    def update_mosh_warning(self):
+        if not hasattr(self, "mosh_warn") or not hasattr(self, "forward_rows"):
+            return
+        conflict = self.options["mosh"].get_active() and (
+            self.options["tunnel"].get_active() or bool(self.forward_rows))
+        self.mosh_warn.set_visible(conflict)
 
     def add_forward(self, kind, listen, dest, focus=False):
         box = ui.vbox(4, "forward")
@@ -413,6 +516,7 @@ class Window(Gtk.ApplicationWindow):
         def drop():
             self.forward_rows.remove(row)
             box.destroy()
+            self.update_mosh_warning()
         kinds.connect("changed", update)
         port.connect("changed", update)
         target.connect("changed", update)
@@ -423,6 +527,7 @@ class Window(Gtk.ApplicationWindow):
         self.forward_box.pack_start(box, False, False, 0)
         box.show_all()
         update()
+        self.update_mosh_warning()
         if focus:
             port.grab_focus()
 
@@ -468,7 +573,8 @@ class Window(Gtk.ApplicationWindow):
         name = self.fields["name"].get_text().strip()
         if self.kind != "ssh":
             f = {k: e.get_text().strip() for k, e in self.fields.items()}
-            problem = hosts.save_remote(name, self.kind, f["hostname"], f["port"], f["user"])
+            problem = hosts.save_remote(name, self.kind, f["hostname"], f["port"], f["user"],
+                                        old_path=self.editing_remote)
             self.error.set_text(problem or "")
             return problem is None
         if self.editable:
@@ -501,13 +607,21 @@ class Window(Gtk.ApplicationWindow):
         return True
 
     def save_and_back(self):
+        was_new_remote = self.kind != "ssh" and not self.editing_remote
         if self.save():
-            if self.kind != "ssh":
+            if was_new_remote:
                 ui.message(self, "Added to the home screen",
                            "Remmina asks for the password the first time you connect.")
             self.back()
 
     def delete(self):
+        if self.editing_remote:
+            name = self.fields["name"].get_text().strip() or "this remote desktop"
+            if ui.confirm(self, f"Delete {name}?",
+                          "Its Remmina profile will be removed.", "Delete", danger=True):
+                hosts.delete_remote(self.editing_remote)
+                self.back()
+            return
         if ui.confirm(self, f"Delete {self.editing}?",
                       "It is removed from ~/.ssh/config. A backup is kept beside it.",
                       "Delete", danger=True):

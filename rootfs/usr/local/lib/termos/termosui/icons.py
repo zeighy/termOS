@@ -18,6 +18,7 @@ _CODES = {
     "lan": 0x0317, "vpn": 0x0582, "cpu": 0x061A, "memory": 0x035B, "disk": 0x02CA, "swap": 0x04E1,
     "temperature": 0x050F, "clock": 0x0150, "touchpad": 0x037D, "link": 0x0337,
     "link-off": 0x0338, "shield": 0x0498, "history": 0x02DA,
+    "night": 0x0594, "eject": 0x01EA, "mic": 0x036C, "mic-off": 0x036D, "usb": 0x0553,
     "battery": 0x0079, "battery-charging": 0x0084,
 }
 

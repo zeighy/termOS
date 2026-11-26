@@ -1,13 +1,16 @@
 #!/usr/bin/python3 -I
 """termOS lock-screen secrets: the only code that can read the PIN or check the password.
 
-Runs as root through a password-less sudo rule limited to this script, so:
-  * secrets arrive on stdin, never in arguments (arguments are visible in /proc);
-  * it only ever acts on the user who called sudo;
+Runs as root via termos-pin.socket (with a password-less sudo rule as fallback), so:
+  * secrets arrive on the socket or stdin, never in arguments (arguments are visible in /proc);
+  * it never goes through sudo/PAM during normal operation, so pam_faillock on sudo
+    cannot lock the user out of the lock screen;
+  * it only ever acts on the calling user (SO_PEERCRED on the socket, or SUDO_UID);
   * every attempt is counted on disk BEFORE it is checked, under a file lock, so
     killing the helper, running it in parallel or rebooting doesn't buy more guesses;
   * it uses only the standard library, in Python's isolated mode.
 
+  termos-pin --socket          systemd socket-activated server (root only)
   termos-pin status            {"set": ..., "pin_wait": s, "pin_blocked": ..., "password_wait": s}
   termos-pin verify-pin        stdin: PIN
   termos-pin verify-password   stdin: account password
@@ -24,6 +27,8 @@ import hmac
 import json
 import os
 import pwd
+import socket
+import struct
 import sys
 import time
 
@@ -32,6 +37,8 @@ MAX_PIN_FAILS = 10                                      # after this only the pa
 PIN_DELAYS = {5: 30, 6: 60, 7: 120, 8: 300, 9: 600}     # failures so far -> seconds to wait
 PASSWORD_DELAYS = {5: 30, 6: 60, 7: 120}                # later failures wait 300 s; never blocked
 OK, WRONG, BAD, WAIT = 0, 1, 2, 3
+SOCKET_ARITY = {"status": 0, "verify-pin": 1, "verify-password": 1, "set": 3}
+MAX_SOCKET_REQ = 4096
 
 
 def reply(code, **info):
@@ -154,18 +161,101 @@ class Store:
         return OK
 
 
+def dispatch(cmd, who, lines):
+    store = Store(who.pw_uid)
+    if cmd == "status":
+        return OK, store.status()
+    if cmd == "init":
+        pin = lines[0]
+        problem = pin_problem(pin)
+        if problem:
+            return BAD, {"error": problem}
+        store.set_pin(pin)
+        return OK, store.status()
+    if cmd.startswith("verify-"):
+        code = store.verify(cmd[len("verify-"):], who.pw_name, lines[0])
+        return code, store.status()
+
+    # set: always needs the current PIN or the account password
+    kind = lines[0].decode(errors="replace")
+    secret, new = lines[1], lines[2]
+    if kind not in ("pin", "password"):
+        return BAD, {"error": "bad request"}
+    problem = pin_problem(new)
+    if problem:
+        return BAD, {"error": problem}
+    code = store.verify(kind, who.pw_name, secret)
+    if code != OK:
+        return code, store.status()
+    store.set_pin(new)
+    return OK, store.status()
+
+
+def serve_socket():
+    sock = socket.fromfd(0, socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(5.0)
+
+    def send(code, info):
+        try:
+            sock.sendall((json.dumps({"code": code, **info}) + "\n").encode())
+        except OSError:
+            pass
+        finally:
+            sock.close()
+        sys.exit(0)
+
+    try:
+        creds = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("=iII"))
+        _pid, caller, _gid = struct.unpack("=iII", creds)
+    except OSError:
+        send(BAD, {"error": "bad request"})
+    if caller == 0:
+        send(BAD, {"error": "bad request"})
+    try:
+        who = pwd.getpwuid(caller)
+    except KeyError:
+        send(BAD, {"error": "no such user"})
+
+    # read the whole request before taking the file lock, so a slow client can't hang the lock screen
+    chunks, total = [], 0
+    try:
+        while True:
+            chunk = sock.recv(MAX_SOCKET_REQ - total + 1)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_SOCKET_REQ:
+                send(BAD, {"error": "bad request"})
+            chunks.append(chunk)
+    except OSError:
+        send(BAD, {"error": "bad request"})
+
+    raw = b"".join(chunks)
+    if raw.endswith(b"\n"):
+        raw = raw[:-1]
+    parts = raw.split(b"\n") if raw else []
+    cmd = parts[0].decode(errors="replace") if parts else ""
+    lines = parts[1:]
+    if cmd not in SOCKET_ARITY or len(lines) != SOCKET_ARITY[cmd]:
+        send(BAD, {"error": "bad request"})
+    code, info = dispatch(cmd, who, lines)
+    send(code, info)
+
+
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "check":
         problem = pin_problem(read_line())
         reply(BAD if problem else OK, error=problem)
     if os.geteuid() != 0:
-        reply(BAD, error="must run through sudo")
+        reply(BAD, error="must run as root")
+    if cmd == "--socket" and len(sys.argv) == 2:
+        serve_socket()
     caller = int(os.environ.get("SUDO_UID", "0"))
     try:
         if cmd == "init" and caller == 0 and len(sys.argv) == 3:
             who = pwd.getpwnam(sys.argv[2])
-        elif cmd in ("status", "verify-pin", "verify-password", "set") and caller != 0 and len(sys.argv) == 2:
+        elif cmd in SOCKET_ARITY and caller != 0 and len(sys.argv) == 2:
             who = pwd.getpwuid(caller)
         else:
             reply(BAD, error="bad request")
@@ -175,33 +265,8 @@ def main():
     # everything is read before the lock is taken, so a caller that never
     # finishes writing can't hang the lock screen
     lines = [] if cmd == "status" else [read_line() for _ in range(3 if cmd == "set" else 1)]
-    store = Store(who.pw_uid)
-    if cmd == "status":
-        reply(OK, **store.status())
-    if cmd == "init":
-        pin = lines[0]
-        problem = pin_problem(pin)
-        if problem:
-            reply(BAD, error=problem)
-        store.set_pin(pin)
-        reply(OK, **store.status())
-    if cmd.startswith("verify-"):
-        code = store.verify(cmd[len("verify-"):], who.pw_name, lines[0])
-        reply(code, **store.status())
-
-    # set: always needs the current PIN or the account password
-    kind = lines[0].decode(errors="replace")
-    secret, new = lines[1], lines[2]
-    if kind not in ("pin", "password"):
-        reply(BAD, error="bad request")
-    problem = pin_problem(new)
-    if problem:
-        reply(BAD, error=problem)
-    code = store.verify(kind, who.pw_name, secret)
-    if code != OK:
-        reply(code, **store.status())
-    store.set_pin(new)
-    reply(OK, **store.status())
+    code, info = dispatch(cmd, who, lines)
+    reply(code, **info)
 
 
 if __name__ == "__main__":

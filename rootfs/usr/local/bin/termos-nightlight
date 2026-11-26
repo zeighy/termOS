@@ -1,0 +1,64 @@
+#!/bin/bash
+# termOS Night Light (wlsunset): warm screen colour temperature for low-light use.
+#   termos-nightlight on [TEMP] | off | toggle | status | restore
+conf="$HOME/.config/termos/settings.conf"
+NIGHT_LIGHT=0
+NIGHT_TEMP=4000
+[ -f "$conf" ] && . "$conf"
+[[ $NIGHT_TEMP =~ ^[0-9]+$ ]] && (( NIGHT_TEMP >= 2000 && NIGHT_TEMP <= 6000 )) || NIGHT_TEMP=4000
+
+uid=$(id -u)
+running() { pgrep -u "$uid" -x wlsunset >/dev/null 2>&1; }
+stop() { pkill -u "$uid" -x wlsunset 2>/dev/null || true; }
+save() {
+    local k=$1 v=$2
+    mkdir -p "${conf%/*}"
+    touch "$conf"
+    if grep -q "^${k}=" "$conf"; then
+        sed -i "s|^${k}=.*|${k}=${v}|" "$conf"
+    else
+        printf '%s=%s\n' "$k" "$v" >> "$conf"
+    fi
+}
+start_temp() {
+    local temp=$1
+    stop
+    command -v wlsunset >/dev/null 2>&1 || exit 1
+    # High temp = temp + 1 keeps the display continuously at $temp regardless of clock.
+    # wlsunset has no default location (it would compute sunrise from NaN), so give it one;
+    # with both temperatures almost equal the place doesn't matter.
+    setsid -f wlsunset -l 0 -L 0 -t "$temp" -T "$((temp + 1))" >/dev/null 2>&1
+}
+
+case "${1:-toggle}" in
+    status)
+        if running || [ "$NIGHT_LIGHT" = 1 ]; then echo on; exit 0; fi
+        echo off; exit 1 ;;
+    on)
+        if [[ ${2:-} =~ ^[0-9]+$ ]] && (( $2 >= 2000 && $2 <= 6000 )); then
+            NIGHT_TEMP=$2
+            save NIGHT_TEMP "$NIGHT_TEMP"
+        fi
+        save NIGHT_LIGHT 1
+        start_temp "$NIGHT_TEMP" ;;
+    off)
+        save NIGHT_LIGHT 0
+        stop ;;
+    toggle)
+        # same rule as "status", so the Quick Settings tile always flips what it shows
+        if running || [ "$NIGHT_LIGHT" = 1 ]; then
+            save NIGHT_LIGHT 0
+            stop
+        else
+            save NIGHT_LIGHT 1
+            start_temp "$NIGHT_TEMP"
+        fi ;;
+    restore)
+        if [ "$NIGHT_LIGHT" = 1 ]; then
+            start_temp "$NIGHT_TEMP"
+        else
+            stop
+        fi ;;
+    *) echo "usage: termos-nightlight on [TEMP] | off | toggle | status | restore" >&2; exit 1 ;;
+esac
+exit 0

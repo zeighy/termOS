@@ -256,10 +256,24 @@ class TailscaleControls(Gtk.Box):
         line = ui.hbox(12)
         self.state = ui.label("", "sub", wrap=True)
         line.pack_start(self.state, True, True, 0)
-        self.login = ui.button("Sign in…", lambda: core.spawn("foot", "-T", "Tailscale sign-in", "-e",
-                                                              "termos-tailscale-login"))
+        self.login = ui.button("Sign in…", self.sign_in)
         line.pack_start(self.login, False, False, 0)
         self.pack_start(line, False, False, 9)
+
+        # Optional custom control server (e.g. self-hosted Headscale)
+        srv_row = ui.hbox(8)
+        srv_words = ui.vbox(2)
+        srv_words.pack_start(ui.label("Control server", "row-label"), False, False, 0)
+        srv_words.pack_start(ui.label("Leave blank for Tailscale, or enter a Headscale URL", "sub", wrap=True),
+                             False, False, 0)
+        srv_row.pack_start(srv_words, True, True, 0)
+        self.server_entry = Gtk.Entry(text=core.read_conf().get("TAILSCALE_SERVER", ""),
+                                      placeholder_text="https://headscale.example.com")
+        self.server_entry.set_width_chars(14)
+        self.server_entry.set_valign(Gtk.Align.CENTER)
+        self.server_entry.connect("changed", self.server_changed)
+        srv_row.pack_end(self.server_entry, False, False, 0)
+        self.pack_start(srv_row, False, False, 6)
 
         # only shown once signed in and some machine offers itself as an exit node
         self.exit_row = ui.hbox(12)
@@ -283,6 +297,15 @@ class TailscaleControls(Gtk.Box):
 
     def gone(self, _w):
         self.alive = False
+
+    def server_changed(self, entry):
+        core.write_conf("TAILSCALE_SERVER", entry.get_text().strip())
+
+    def sign_in(self):
+        srv = self.server_entry.get_text().strip()
+        core.write_conf("TAILSCALE_SERVER", srv)
+        args = ["--login-server", srv] if srv else []
+        core.spawn("foot", "-T", "Tailscale sign-in", "-e", "termos-tailscale-login", *args)
 
     def switched(self, on):
         self.state.set_text("Starting…" if on else "Stopping…")
@@ -423,7 +446,7 @@ class PinChanger(Gtk.Box):
         self.old.set_text("")
         self.old.set_max_length(10 if by_pin else 128)
         self.old.set_placeholder_text("Current PIN" if by_pin else "Account password")
-        self.other.get_child().get_children()[0].set_text("Forgot PIN" if by_pin else "Use PIN")
+        self.other.label_widget.set_text("Forgot PIN" if by_pin else "Use PIN")
         self.old.grab_focus()
 
     def say(self, text, good=False):

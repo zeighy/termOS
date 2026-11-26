@@ -11,6 +11,7 @@ sof-firmware
 alsa-ucm-conf
 e2fsprogs
 dosfstools
+cryptsetup
 sudo
 nano
 bash-completion
@@ -51,6 +52,7 @@ squeekboard
 xdg-utils
 wl-clipboard
 wlr-randr
+wlsunset
 iio-sensor-proxy
 brightnessctl
 papirus-icon-theme

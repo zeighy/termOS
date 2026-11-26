@@ -1,7 +1,7 @@
 [Unit]
 Description=termOS desktop for %i (starts at the lock screen)
-After=systemd-user-sessions.service plymouth-quit-wait.service getty@tty1.service systemd-logind.service dbus.socket
-Wants=dbus.socket systemd-logind.service
+After=systemd-user-sessions.service plymouth-quit-wait.service getty@tty1.service systemd-logind.service dbus.socket termos-pin.socket
+Wants=dbus.socket systemd-logind.service termos-pin.socket
 Conflicts=getty@tty1.service
 Before=graphical.target
 ConditionPathExists=/dev/tty0

@@ -19,6 +19,7 @@ class Shell(Gtk.Application):
         self.overlay = None
         self.overlay_kind = None
         self.rebuild_queued = 0
+        self.outputs_queued = 0
         self.restore_queued = 0
         self.focused = None
         self.known_windows = set()
@@ -48,8 +49,8 @@ class Shell(Gtk.Application):
             print(f"termos-shell: no window list: {e}")
         self.machines = home.Machines(self)
         display = Gdk.Display.get_default()
-        display.connect("monitor-added", self.monitor_plugged)
-        display.connect("monitor-removed", lambda *_a: self.queue_rebuild())
+        display.connect("monitor-added", self.monitors_changed)
+        display.connect("monitor-removed", self.monitors_changed)
         self.rebuild()
         self.machines.refresh()
         GLib.timeout_add_seconds(2, self.first_run)
@@ -58,9 +59,16 @@ class Shell(Gtk.Application):
         pass
 
     # ---- screens ----------------------------------------------------------
-    def monitor_plugged(self, _display, monitor):
-        # give a screen plugged in later its saved or automatic scale
-        GLib.timeout_add(800, lambda: (core.spawn("termos-outputs", "apply"), False)[1])
+    def monitors_changed(self, _display, _monitor):
+        # apply saved/auto scale, rearrange remaining screens, and keep main-screen rule current
+        if self.outputs_queued:
+            GLib.source_remove(self.outputs_queued)
+
+        def apply_outputs():
+            self.outputs_queued = 0
+            core.spawn("termos-outputs", "apply")
+            return False
+        self.outputs_queued = GLib.timeout_add(800, apply_outputs)
         self.queue_rebuild()
 
     def watch_monitor(self, monitor):

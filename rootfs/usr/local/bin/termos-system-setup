@@ -12,8 +12,8 @@ esac
 systemctl enable $now NetworkManager.service bluetooth.service termos-power.service \
     systemd-timesyncd.service fstrim.timer systemd-boot-update.service termos-console.service
 systemctl mask NetworkManager-wait-online.service
-# security keys and smart cards: both are socket-activated, so they cost nothing until used
-systemctl enable $now pcscd.socket
+# security keys, smart cards, and lock-screen PIN helper: all socket-activated
+systemctl enable $now pcscd.socket termos-pin.socket
 systemctl --global enable ssh-agent.socket
 
 install -d -m 700 /var/lib/termos/lock || exit 1

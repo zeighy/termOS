@@ -1,0 +1,14 @@
+[Unit]
+Description=termOS lock-screen PIN helper socket
+Before=sockets.target
+
+[Socket]
+ListenStream=/run/termos-pin.sock
+SocketUser=root
+SocketGroup=wheel
+SocketMode=0660
+Accept=yes
+MaxConnections=16
+
+[Install]
+WantedBy=sockets.target

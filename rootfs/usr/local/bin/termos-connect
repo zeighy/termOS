@@ -66,8 +66,11 @@ def main():
     signal.signal(signal.SIGHUP, quit_now)
     signal.signal(signal.SIGTERM, quit_now)
 
-    remote = [f"sh -c {shlex.quote(TMUX)}"] if opts["tmux"] else []
-    if opts["mosh"]:
+    saved = next((h for h in hosts.ssh_hosts() if h["name"] == a.target), None)
+    tunnel = bool(opts.get("tunnel"))
+    use_mosh = bool(opts["mosh"]) and not tunnel
+    remote = [f"sh -c {shlex.quote(TMUX)}"] if opts["tmux"] and not tunnel else []
+    if use_mosh:
         cmd = ["mosh"] + ([f"--ssh=ssh -p {a.port}"] if a.port else []) + ["--", a.target]
         if opts["tmux"]:
             cmd += ["sh", "-c", TMUX]
@@ -76,20 +79,25 @@ def main():
                "-o", "ConnectTimeout=15", "-o", "PermitLocalCommand=yes",
                # runs once the login has worked
                "-o", f"LocalCommand=touch {shlex.quote(marker)}"]
+        if tunnel:
+            cmd += ["-N", "-o", "ExitOnForwardFailure=yes"]
         if a.port:
             cmd += ["-p", a.port]
         if remote:
             cmd.append("-t")
         cmd += ["--", a.target] + remote
 
-    saved = next((h for h in hosts.ssh_hosts() if h["name"] == a.target), None)
     on_piv = saved and hosts.key_choice(saved) == hosts.PIV
     ever_up = False
     tries = 0
     try:
         while True:
             set_state("reconnecting" if ever_up else "connecting")
-            say(f"Connecting to {a.target}" + ("  (mosh)" if opts["mosh"] else ""))
+            mode_tag = "  (tunnel)" if tunnel else ("  (mosh)" if use_mosh else "")
+            say(f"Connecting to {a.target}{mode_tag}")
+            if tunnel and saved and saved.get("forwards"):
+                for kind, val in saved["forwards"]:
+                    print(f"  {hosts.FORWARDS.get(kind, kind)} {val}", flush=True)
             if on_piv:
                 # gpg may still be holding the card
                 subprocess.run(["gpgconf", "--kill", "scdaemon"], stderr=subprocess.DEVNULL)
@@ -107,13 +115,18 @@ def main():
                 except subprocess.TimeoutExpired:
                     pass
                 except KeyboardInterrupt:
+                    if tunnel:
+                        child.terminate()
+                        raise
                     continue        # Ctrl+C belongs to ssh
-                if not up and (os.path.exists(marker) if not opts["mosh"]
+                if not up and (os.path.exists(marker) if not use_mosh
                                else time.monotonic() - started > 8):
                     up = ever_up = True
                     tries = 0
                     set_state("connected")
                     hosts.set_meta(a.target, used=time.time())
+                    if tunnel:
+                        say("Tunnel is up. Keep this window open; press Ctrl+C to close it.", DIM)
             if os.path.exists(marker):
                 os.unlink(marker)
                 if not up:
@@ -123,7 +136,7 @@ def main():
             if code == 0:
                 return 0
             # ssh exits 255 when the connection itself failed
-            if opts["mosh"] or code != 255 or not ever_up or not opts["reconnect"]:
+            if use_mosh or code != 255 or not ever_up or not opts["reconnect"]:
                 break
             tries += 1
             delay = min(2 ** tries, 15)
