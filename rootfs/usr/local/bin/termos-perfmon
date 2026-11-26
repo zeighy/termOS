@@ -319,7 +319,7 @@ class PerfMon(Gtk.ApplicationWindow):
                 rd += int(f[5]) * 512
                 wr += int(f[9]) * 512
         if self.prev_disk:
-            r, w = (rd - self.prev_disk[0]) / dt, (wr - self.prev_disk[1]) / dt
+            r, w = max(rd - self.prev_disk[0], 0) / dt, max(wr - self.prev_disk[1], 0) / dt
             self.disk.graph.push(r, w)
             self.disk.set_value(f"read {rate(r)}   write {rate(w)}", rate(r + w))
             st = os.statvfs("/")
@@ -345,20 +345,17 @@ class PerfMon(Gtk.ApplicationWindow):
         self.prev_net = (rx, tx)
 
     def sample_bat(self):
-        cap = slurp(f"{self.bat}/capacity", "0")
-        status = slurp(f"{self.bat}/status", "?")
-        try:
-            self.battery.graph.push(float(cap))
-        except ValueError:
+        info = core.battery()
+        if not info:
             return
+        cap, status = info["percent"], info["status"]
+        self.battery.graph.push(float(cap))
         self.battery.set_value(f"{cap}%   {status}", f"{cap}%")
         parts = []
-        pw = slurp(f"{self.bat}/power_now")
-        if pw.isdigit():
-            parts.append(f"{int(pw) / 1e6:.1f} W")
-        full, design = slurp(f"{self.bat}/energy_full"), slurp(f"{self.bat}/energy_full_design")
-        if full.isdigit() and design.isdigit() and int(design):
-            parts.append(f"health {100 * int(full) // int(design)}%")
+        if info["watts"] is not None:
+            parts.append(f"{info['watts']:.1f} W")
+        if info["health"] is not None:
+            parts.append(f"health {info['health']}%")
         m = re.search(r"^ACTIVE=(\S+)", slurp("/etc/termos/power.conf"), re.M)
         if m:
             parts.append(f"power mode: {m.group(1)}")

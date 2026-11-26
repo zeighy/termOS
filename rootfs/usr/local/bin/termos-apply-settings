@@ -7,7 +7,10 @@ WALLPAPER=/usr/share/backgrounds/termos/default.png
 WALLPAPER_COLOR=""
 MAXIMIZE=1
 KEYBOARD_LAYOUT=""
+TAP_TO_CLICK=1
 NATURAL_SCROLL=0
+DISABLE_WHILE_TYPING=1
+POINTER_SPEED=0.0
 [ -f "$conf" ] && . "$conf"
 rc="$HOME/.config/labwc/rc.xml"
 envf="$HOME/.config/labwc/environment"
@@ -24,7 +27,7 @@ theme() {
 }
 
 wallpaper() {
-    pkill -u "$USER" -x swaybg
+    pkill -u "$(id -u)" -x swaybg
     if [ -n "$WALLPAPER_COLOR" ]; then
         setsid -f swaybg -c "$WALLPAPER_COLOR" >/dev/null 2>&1
     elif [ -f "$WALLPAPER" ]; then
@@ -56,12 +59,35 @@ keyboard() {
 }
 
 touchpad() {
-    # naturalScroll in the touchpad block of rc.xml: 0 = normal, 1 = inverted
-    # ("natural", like a phone: content follows the fingers).
+    # Update touchpad libinput tags in rc.xml (inserting new tags on older installs).
     [ -f "$rc" ] || return 0
-    local want=no; [ "$NATURAL_SCROLL" = 1 ] && want=yes
-    if ! grep -q "<naturalScroll>$want</naturalScroll>" "$rc"; then
-        sed -i "s|<naturalScroll>[a-z]*</naturalScroll>|<naturalScroll>$want</naturalScroll>|" "$rc"
+    local tap=no nat=no dwt=no spd=0.0
+    [ "$TAP_TO_CLICK" = 1 ] && tap=yes
+    [ "$NATURAL_SCROLL" = 1 ] && nat=yes
+    [ "$DISABLE_WHILE_TYPING" = 1 ] && dwt=yes
+    [[ $POINTER_SPEED =~ ^-?[0-9]+(\.[0-9]+)?$ ]] && spd=$POINTER_SPEED
+    if python3 -I - "$rc" "$tap" "$nat" "$dwt" "$spd" <<'PY'
+import re, sys
+path, tap, nat, dwt, spd = sys.argv[1:6]
+with open(path, encoding="utf-8") as f:
+    text = f.read()
+m = re.search(r'(<device\s+category="touchpad"[^>]*>)(.*?)(</device>)', text, re.S)
+if not m:
+    sys.exit(2)
+body = m.group(2)
+for tag, val in (("tap", tap), ("naturalScroll", nat), ("disableWhileTyping", dwt), ("pointerSpeed", spd)):
+    pat = rf"<{tag}>[^<]*</{tag}>"
+    if re.search(pat, body):
+        body = re.sub(pat, f"<{tag}>{val}</{tag}>", body, count=1)
+    else:
+        body = body.rstrip() + f"\n      <{tag}>{val}</{tag}>\n    "
+new = text[:m.start(2)] + body + text[m.end(2):]
+if new == text:
+    sys.exit(2)
+with open(path, "w", encoding="utf-8") as f:
+    f.write(new)
+PY
+    then
         reconf=1
     fi
 }

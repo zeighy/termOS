@@ -31,6 +31,8 @@
     <device category="touchpad">
       <tap>yes</tap>
       <naturalScroll>no</naturalScroll>
+      <disableWhileTyping>yes</disableWhileTyping>
+      <pointerSpeed>0.0</pointerSpeed>
     </device>
   </libinput>
 

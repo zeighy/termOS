@@ -1,0 +1,16 @@
+[Unit]
+Description=termOS lock-screen PIN helper
+
+[Service]
+ExecStart=/usr/local/bin/termos-pin --socket
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+StateDirectory=termos
+StateDirectoryMode=0755
+NoNewPrivileges=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX

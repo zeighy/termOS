@@ -113,7 +113,9 @@ class Quick(Overlay):
             tiles.append(("rotate" if auto else "rotate-lock", "Auto-rotate", auto,
                           lambda: self.run_and_close("termos-rotate", "lock" if auto else "auto")))
             tiles.append(("rotate", "Rotate 90°", False, lambda: self.run_and_close("termos-rotate", "cw")))
+        night_on = core.run("termos-nightlight", "status").returncode == 0
         tiles += [
+            ("night", "Night Light", night_on, lambda: self.run_and_close("termos-nightlight", "toggle")),
             ("coffee", "Keep awake", self.shell.keep_awake(), self.toggle_awake),
             ("keyboard", "Keyboard", False, lambda: self.run_and_close("termos-osk", "toggle")),
             ("camera", "Screenshot", False, lambda: self.run_and_close("termos-screenshot", "full")),
@@ -139,6 +141,12 @@ class Quick(Overlay):
             self.modes[key] = b
             modes.add(b)
         box.pack_start(modes, False, False, 0)
+
+        self.usb_box = ui.vbox(6)
+        self.usb_box.set_no_show_all(True)
+        box.pack_start(self.usb_box, False, False, 0)
+        self.load_usb()
+
         self.error = ui.label("", "error", "sub", wrap=True)
         self.error.set_no_show_all(True)
         box.pack_start(self.error, False, False, 0)
@@ -196,7 +204,7 @@ class Quick(Overlay):
             # don't fight the finger that is dragging it
             if not self.volume.get_state_flags() & Gtk.StateFlags.ACTIVE:
                 ui.set_quietly(self.volume, min(percent, 100))
-            self.mute.get_child().get_children()[0].set_text(icons.volume_glyph(percent, muted))
+            self.mute.icon_widget.set_text(icons.volume_glyph(percent, muted))
 
         parts = []
         if st.battery:
@@ -252,6 +260,36 @@ class Quick(Overlay):
     def toggle_awake(self):
         self.shell.set_keep_awake(not self.shell.keep_awake())
         self.shell.close_overlay()
+
+    def load_usb(self):
+        def done(drives):
+            if self.shell.overlay is not self:
+                return
+            ui.clear(self.usb_box)
+            if not drives:
+                self.usb_box.hide()
+                return
+            self.usb_box.pack_start(ui.label("USB drives", "heading"), False, False, 0)
+            for drv in drives:
+                row = ui.hbox(8)
+                row.pack_start(ui.icon("usb", "accent"), False, False, 0)
+                row.pack_start(ui.label(drv["label"], ellipsize=True), True, True, 0)
+                row.pack_end(ui.button("Eject", lambda d=drv: self.eject_usb(d), icon_name="eject"),
+                             False, False, 0)
+                self.usb_box.pack_start(row, False, False, 0)
+            self.usb_box.show_all()
+        ui.background(core.removable_mounts, done)
+
+    def eject_usb(self, drv):
+        def done(result):
+            ok, err = result or (False, "Couldn't eject drive.")
+            if ok:
+                core.spawn("notify-send", "-a", "termOS", "Safe to remove", f"{drv['label']} was ejected.")
+            elif self.shell.overlay is self:
+                self.fail(f"Couldn't eject {drv['label']}: {err}")
+            if self.shell.overlay is self:
+                self.load_usb()
+        ui.background(lambda: core.eject_mount(drv), done)
 
 
 class Power(Overlay):

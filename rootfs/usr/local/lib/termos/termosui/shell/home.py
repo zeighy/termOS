@@ -104,6 +104,10 @@ class Home:
         for child in head.get_children():
             child.set_valign(Gtk.Align.CENTER)
         page.pack_start(head, False, False, 0)
+        self.search = Gtk.SearchEntry(placeholder_text="Filter machines")
+        self.search.connect("search-changed", lambda _e: self.update())
+        self.search.set_no_show_all(True)
+        page.pack_start(self.search, False, False, 0)
         self.body = ui.vbox(10)
         page.pack_start(self.body, False, False, 0)
         win.add(ui.scrolled(ui.Clamp(page, 1100)))
@@ -127,10 +131,15 @@ class Home:
         m = self.shell.machines
         if not m.loaded:
             return
-        cards = [self.card_state(x) for x in m.items]
-        if cards == self.drawn:
+        query = self.search.get_text().strip().lower()
+        self.search.set_visible(len(m.items) >= 6 or bool(query))
+        shown = [x for x in m.items if not query or all(
+            w in " ".join(str(x.get(k) or "") for k in ("name", "host", "user", "protocol")).lower()
+            for w in query.split())]
+        cards = [self.card_state(x) for x in shown]
+        if (cards, query) == self.drawn:
             return
-        self.drawn = cards
+        self.drawn = (cards, query)
         ui.clear(self.body)
         if not m.items:
             box = ui.empty_state(
@@ -141,12 +150,15 @@ class Home:
                 ui.button("Remote Desktop", lambda: self.shell.launch("remmina")))
             ui.classes(box, "panelcard")
             self.body.pack_start(box, False, False, 10)
+        elif not shown:
+            self.body.pack_start(ui.label("No machines match your filter.", "sub", xalign=0.5),
+                                 False, False, 16)
         else:
             flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
                                column_spacing=10, row_spacing=10)
             flow.set_max_children_per_line(self.columns)
             flow.set_min_children_per_line(self.columns)
-            for machine, state in zip(m.items, cards):
+            for machine, state in zip(shown, cards):
                 child = Gtk.FlowBoxChild()
                 child.set_can_focus(False)
                 child.add(self.card(machine, state))

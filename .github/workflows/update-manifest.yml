@@ -1,0 +1,30 @@
+# Devices refuse an update whose MANIFEST.sha256 doesn't match the files on main or
+# isn't signed by a key in rootfs/etc/termos/update.pub. This check catches that on the
+# pull request, before merging. It only verifies; signing happens on the maintainer's
+# machine (./scripts/sign-manifest.sh), so no private key is ever stored on GitHub.
+name: Update manifest
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify signed manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check MANIFEST.sha256 and its signature
+        run: |
+          if [ ! -f MANIFEST.sha256 ]; then
+            echo "::error::MANIFEST.sha256 is missing. Run ./scripts/sign-manifest.sh and commit MANIFEST.sha256 and MANIFEST.sha256.sig."
+            exit 1
+          fi
+          ./scripts/sign-manifest.sh --check || {
+            echo "::error::The update manifest doesn't match this tree or its signature. Run ./scripts/sign-manifest.sh as the last commit (with the branch up to date with main)."
+            exit 1
+          }

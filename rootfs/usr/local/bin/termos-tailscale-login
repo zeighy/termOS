@@ -1,10 +1,45 @@
 #!/bin/bash
-# termOS: sign this device in to Tailscale; opens the login page in Chromium.
-echo "Starting Tailscale sign-in..."
+# termOS: sign this device in to Tailscale (or a self-hosted Headscale server);
+# opens the login URL in Chromium.
+#   termos-tailscale-login [--login-server https://...]
+server=""
+if [ "${1:-}" = --login-server ]; then
+    server=${2:-}
+else
+    conf="$HOME/.config/termos/settings.conf"
+    if [ -f "$conf" ]; then
+        TAILSCALE_SERVER=""
+        # shellcheck source=/dev/null
+        . "$conf"
+        server=$TAILSCALE_SERVER
+    fi
+fi
+
+args=()
+if [ -n "$server" ]; then
+    if [[ $server =~ ^https?://[^[:space:]]+$ ]]; then
+        args+=(--login-server="$server")
+        echo "Starting Tailscale sign-in ($server)..."
+    else
+        echo "Invalid control server URL: $server" >&2
+        read -rp "Press Enter to close"
+        exit 1
+    fi
+else
+    echo "Starting Tailscale sign-in..."
+fi
+
+# the sign-in page is on the control server; other URLs (warnings, docs links) are not opened
+auth_host=login.tailscale.com
+if [ -n "$server" ]; then
+    auth_host=${server#*://}
+    auth_host=${auth_host%%[/:]*}
+fi
 opened=0
-tailscale up 2>&1 | while IFS= read -r line; do
+tailscale up "${args[@]}" 2>&1 | while IFS= read -r line; do
     echo "$line"
-    if [ $opened = 0 ] && [[ $line =~ (https://login\.tailscale\.com/[^[:space:]]+) ]]; then
+    if [ $opened = 0 ] && [[ $line =~ (https?://([^/:[:space:]]+)[^[:space:]]*) ]] \
+       && [ "${BASH_REMATCH[2]}" = "$auth_host" ]; then
         xdg-open "${BASH_REMATCH[1]}" >/dev/null 2>&1 &
         opened=1
         echo "(Opened the sign-in page in the browser.)"

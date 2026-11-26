@@ -1,0 +1,10 @@
+# termOS update signing public key(s), in OpenSSH allowed_signers format:
+#   termos-update ssh-ed25519 AAAA...
+#   termos-update sk-ssh-ed25519@openssh.com AAAA...
+#
+# Once at least one key is listed here, termos-update refuses any update
+# whose MANIFEST.sha256 is not signed by a key in this file.
+# Set up a key and sign MANIFEST.sha256 with:
+#   ./scripts/sign-manifest.sh --init
+#   ./scripts/sign-manifest.sh
+termos-update ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN6aH64tk3pmqiRH21yWb++EXG0RZjlwLHUuWShBQ8pF

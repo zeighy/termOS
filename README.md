@@ -162,8 +162,9 @@ and (unless turned off in Settings › Lock screen) when the screen turns off.
 * After 5 wrong PINs each try waits longer (30 s up to 10 min). After 10, only
   the password unlocks. Restarting doesn't reset this.
 * Change the PIN in Settings › Lock screen.
-* The disk is **not encrypted**. The PIN protects a device someone picks up,
-  not storage that is removed or a device booted from USB.
+* **Lock screen** (`termos-lock`): PIN at every start and after sleep (`gtk-session-lock`), with QWERTY/QWERTZ/AZERTY and accented-character (`ÀÉÜ`) on-screen password keyboard layouts.
+* **Optional disk encryption (LUKS2)**: Choose whether to encrypt the disk during install (off by default), or encrypt an existing unencrypted install safely offline later from the live USB (*Encrypt an existing termOS install*). Enabling encryption adds a boot-time passphrase prompt before the lock screen, which needs a keyboard; forgetting the passphrase without a recovery key makes data unrecoverable.
+* **Optional TPM2 unlock**: on devices with a working TPM2 chip, the installer and the live-USB encryption offer to let the chip unlock the disk at boot (bound to PCR 7, the Secure Boot state), so the device starts straight to the PIN lock screen and the passphrase stays as a backup. The chip is tested first (sealing and unsealing a test secret), and after enrolling, termOS checks that the new TPM2 slot really opens the disk, removing it again if not. Without Secure Boot, TPM2 unlock protects storage taken out of the device, not a stolen device; the prompt says so. Turn it on or off later, and manage passphrases and recovery keys, in *Settings › Lock screen* or `termos-encrypt`.
 
 How it works, for anyone changing it:
 
@@ -176,9 +177,12 @@ How it works, for anyone changing it:
    screen is locked before sleep, and restarts the locker if it dies (the
    compositor keeps the screen locked meanwhile).
 4. `termos-pin` is the only thing that can read the PIN hash
-   (`/var/lib/termos/lock`, root only). It runs through a sudo rule limited
-   to that script, takes secrets on stdin and counts every attempt before
-   checking it.
+   (`/var/lib/termos/lock`, root only). It runs as a root systemd socket
+   service (`termos-pin.socket`, restricted to the `wheel` group and
+   authenticated via `SO_PEERCRED`), bypassing `sudo`/PAM so a `pam_faillock`
+   lockout on `sudo` can never lock you out of the lock screen. Secrets travel
+   over the Unix socket (or stdin in CLI fallback), and every attempt is
+   counted on disk before checking.
 
 ### Screen rotation
 
@@ -206,15 +210,15 @@ Open it from Quick Settings (⚙) or the apps tray.
 
 | Page        | What you can change |
 |-------------|---------------------|
-| Display     | brightness; **resolution and scale (automatic, or 100–300 %) for every connected screen**; **screen arrangement (drag on a map) and main screen, where new apps open**; auto-rotate, rotate, sensor-upside-down fix; open apps full-screen; home screen on/off |
+| Display     | brightness; **resolution and scale (automatic, or 100–300 %) for every connected screen**; **screen arrangement (drag on a map) and main screen, where new apps open**; auto-rotate, rotate, sensor-upside-down fix; **Night Light** warmth; open apps full-screen; home screen on/off |
 | Power       | power mode, battery health, automatic battery saver, dim / screen-off / sleep timers, power button |
-| Lock screen | change PIN, lock when the screen turns off, lock now |
+| Lock screen | change PIN, lock when the screen turns off, lock now, **disk encryption status & LUKS2 key/TPM2 management** |
 | Security keys | key PIN, passkeys on the key, SSH keys on hardware, phone passkeys, smart cards |
 | Wi-Fi       | join, forget and switch networks |
-| Network     | IP address, SSH server, Bluetooth, Tailscale |
-| Sound       | volume, mute |
+| Network     | IP address, SSH server, Bluetooth, Tailscale (including exit node and optional custom Headscale control server) |
+| Sound       | **output & microphone device selector**, output/mic volume, mute |
 | Wallpaper   | built-in or own pictures (`~/Pictures/Wallpapers`), any image, or a plain colour |
-| Keyboard    | hardware keyboard layout, scroll direction, show/hide on-screen keyboard |
+| Keyboard    | hardware keyboard layout, **touchpad tap-to-click, natural scroll, disable-while-typing, pointer speed**, show/hide on-screen keyboard |
 | System      | device name, timezone, update, optional CJK fonts, device info |
 
 Settings that need admin rights (SSH server, hostname, timezone and
@@ -265,19 +269,18 @@ mosh for a host to keep the session itself.
 
 ### SSH hosts, screenshots, Bluetooth, Tailscale
 
-* **SSH Hosts** shows every `Host` in `~/.ssh/config` as a card with its
-  address, online state and last use, plus a quick-connect box
-  (`user@host` or `user@host:port`). *Add host* and the pencil edit hosts
-  without touching the file (comments and other options are preserved; the
-  previous file is kept as `config.termos-bak`). Per host: *Resume where I
-  left off* (tmux), *Reconnect automatically*, *mosh*. *Port forwarding*
-  adds `LocalForward` (a server port reachable here), `RemoteForward` (a port
-  here reachable from the server) and `DynamicForward` (SOCKS proxy) lines;
-  they're up while the connection is (not with mosh). *Advanced* sets a jump
-  host (`ProxyJump`), agent forwarding, and any other `ssh_config` options,
-  one per line. The editor can also create a key and copy it to the host. *Add host* also makes RDP and VNC
-  connections (saved as Remmina profiles), and with Tailscale on, *From
-  Tailscale* fills in a machine from your tailnet.
+* **SSH Hosts** shows every `Host` in `~/.ssh/config` and saved RDP/VNC profiles
+  as cards with address, online state, last use, filter bar, and one-tap **SFTP
+  file browsing** (`thunar sftp://...`), plus a quick-connect box
+  (`user@host` or `user@host:port`). *Add host* and the pencil edit SSH, RDP, and
+  VNC hosts without touching other config lines (comments and other options are
+  preserved; `~/.ssh/config` keeps `config.termos-bak`). Per SSH host: *Resume
+  where I left off* (tmux), *Reconnect automatically*, *mosh*, and *Tunnel only*
+  (`ssh -N`). *Port forwarding* adds `LocalForward`, `RemoteForward` and
+  `DynamicForward` (SOCKS proxy) lines, with an active warning if mosh is also
+  enabled. *Advanced* sets a jump host (`ProxyJump`), agent forwarding, and any
+  other `ssh_config` options, one per line. With Tailscale on, *From Tailscale*
+  fills in a machine from your tailnet.
 * **Screenshots**: `Print` (whole screen), `Shift+Print` (area), or the
   desktop menu (also "in 3 seconds"), Quick Settings or apps tray. Saved to
   `~/Pictures/Screenshots` and copied to the clipboard.
@@ -353,11 +356,34 @@ progress and what changed. It runs `termos-update`, which also works in a
 terminal and:
 
 1. runs `sudo pacman -Syu` (all Arch packages),
-2. downloads the latest termOS scripts/configs from this GitHub repo,
+2. downloads the latest termOS scripts/configs from this GitHub repo and
+   verifies `MANIFEST.sha256` (and its OpenSSH signature against the installed
+   `/etc/termos/update.pub` once a signing key is pinned),
 3. installs any packages newly added to `packages.x86_64`,
-4. updates your desktop config files: files you edited are kept, and termOS's
+4. installs system files and removes any obsolete termOS-managed files dropped
+   by newer versions,
+5. updates your desktop config files: files you edited are kept, and termOS's
    changes are merged into them. If both changed the same lines the new
    version wins and yours is saved in `~/.config/termos/backup-<date>/`.
+
+**Signing updates (maintainers):** updates are signed with an SSH key whose
+public half is pinned in `rootfs/etc/termos/update.pub`. Devices refuse any
+update from `main` whose `MANIFEST.sha256` doesn't match the downloaded files
+or isn't signed by a pinned key. Devices installed before a key was pinned
+take the first update unchecked; it installs the key, and every later update
+must be signed.
+
+* Before merging anything into `main`, make this the last commit (with the
+  branch up to date with `main`):
+  `./scripts/sign-manifest.sh && git add MANIFEST.sha256 MANIFEST.sha256.sig && git commit -m "Sign update manifest"`.
+  It uses the pinned key in `~/.ssh/termosupdatesign`, or pass `--key PATH`.
+  It refuses to sign files under `rootfs/` that git doesn't track.
+* The *Verify signed manifest* GitHub check runs `./scripts/sign-manifest.sh --check`
+  on every pull request, and `main` requires it to pass, so a forgotten
+  re-sign shows up before merging. No private key is stored on GitHub.
+* Add a backup key with `./scripts/sign-manifest.sh --init PATH` (any pinned key
+  can sign), or `--init --sk` for a YubiKey. If every pinned key is lost, a
+  device can still be updated by hand with `TERMOS_ALLOW_UNSIGNED=1 termos-update`.
 
 Your settings (`~/.config/termos/*.conf`) are kept. Restart afterwards.
 
@@ -406,8 +432,10 @@ Colours live in one file, `termosui/palette.py`. After changing it run
   supported by Linux.
 * Audio on some Gemini Lake tablets may need extra configuration after
   install. `sof-firmware` and `alsa-ucm-conf` are already included.
-* No disk encryption. If a device is lost, treat anything stored on it as
-  exposed despite the PIN. Use SSH keys with passphrases.
+* Disk encryption is **optional** (off by default). If you leave it off and a
+  device is lost, treat anything stored on it as exposed despite the PIN and use
+  SSH keys with passphrases. You can enable LUKS2 during install or later via
+  the live USB (*Encrypt an existing termOS install*).
 * X11-only apps don't run (no Xwayland is installed).
 * Most testing so far is in virtual machines (UEFI 64/32-bit, eMMC, NVMe,
   offline installs). Real-hardware reports are welcome.

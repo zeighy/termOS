@@ -7,5 +7,6 @@ termos-session-guard >/dev/null &
 ( termos-apply-settings; termos-display-setup ) >/dev/null 2>&1 &
 termos-shell-run >/dev/null &
 termos-idle start >/dev/null 2>&1 &
+termos-nightlight restore >/dev/null 2>&1 &
 termos-bluetooth restore >/dev/null 2>&1 &
 termos-battery-monitor >/dev/null 2>&1 &

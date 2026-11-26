@@ -6,44 +6,88 @@
 conf="$HOME/.config/termos/settings.conf"
 pconf=/etc/termos/power.conf
 warned=0
-bat=""
-for s in /sys/class/power_supply/*; do
-    [ "$(cat "$s/type" 2>/dev/null)" = Battery ] || continue
-    [ "$(cat "$s/scope" 2>/dev/null)" = Device ] && continue    # mouse, pen, headset
-    bat=$s; break
-done
-[ -n "$bat" ] || exit 0       # desktop PC: nothing to do
+
+has_battery() {
+    local s
+    for s in /sys/class/power_supply/*; do
+        [ "$(cat "$s/type" 2>/dev/null)" = Battery ] || continue
+        [ "$(cat "$s/scope" 2>/dev/null)" = Device ] && continue    # mouse, pen, headset
+        return 0
+    done
+    return 1
+}
+has_battery || exit 0       # desktop PC: nothing to do
 
 notify() { notify-send -a termOS "$@" 2>/dev/null; }
 helper() { sudo -n /usr/local/bin/termos-root-helper "$@" >/dev/null 2>&1; }
 
+read_battery() {
+    # Sets cap (0-100) and state (Charging|Discharging|Other) across all system batteries.
+    local s c st e_sum=0 e_tot=0 have_energy=1 c_sum=0 c_n=0 charging=0 discharging=0
+    local ef
+    for s in /sys/class/power_supply/*; do
+        [ "$(cat "$s/type" 2>/dev/null)" = Battery ] || continue
+        [ "$(cat "$s/scope" 2>/dev/null)" = Device ] && continue
+        c=$(cat "$s/capacity" 2>/dev/null || true)
+        [[ $c =~ ^[0-9]+$ ]] || continue
+        st=$(cat "$s/status" 2>/dev/null || true)
+        [ "$st" = Charging ] && charging=1
+        [ "$st" = Discharging ] && discharging=1
+        c_sum=$((c_sum + c))
+        c_n=$((c_n + 1))
+        ef=$(cat "$s/energy_full" 2>/dev/null || true)
+        if [[ $ef =~ ^[0-9]+$ ]] && (( ef > 0 )); then
+            e_sum=$((e_sum + c * ef))
+            e_tot=$((e_tot + ef))
+        else
+            have_energy=0
+        fi
+    done
+    (( c_n > 0 )) || return 1
+    if (( have_energy && e_tot > 0 )); then
+        cap=$(( (e_sum + e_tot / 2) / e_tot ))
+    else
+        cap=$(( (c_sum + c_n / 2) / c_n ))
+    fi
+    if (( charging )); then
+        state=Charging
+    elif (( discharging )); then
+        state=Discharging
+    else
+        state=Other
+    fi
+    return 0
+}
+
 while :; do
     AUTO_SAVER=1; SAVER_AT=20
     [ -f "$conf" ] && . "$conf"
+    [[ $SAVER_AT =~ ^[0-9]+$ ]] || SAVER_AT=20
     PROFILE=balanced; ACTIVE=balanced
     [ -r "$pconf" ] && . "$pconf"
-    cap=$(cat "$bat/capacity" 2>/dev/null || echo 100)
-    status=$(cat "$bat/status" 2>/dev/null)
 
-    if [ "$status" = Discharging ]; then
-        if [ "$AUTO_SAVER" = 1 ] && [ "$cap" -le "$SAVER_AT" ] && \
-           [ "$PROFILE" != power-saver ] && [ "$ACTIVE" != power-saver ]; then
-            helper power auto-saver && notify -i battery-low "Battery saver on" \
-                "Battery at ${cap}%. Performance is limited until you plug in."
-        fi
-        if [ "$cap" -le 5 ] && [ "$warned" -lt 2 ]; then
-            notify -u critical -i battery-caution "Battery critically low (${cap}%)" \
-                "Plug in now. Unsaved work may be lost."
-            warned=2
-        elif [ "$cap" -le 15 ] && [ "$warned" -lt 1 ]; then
-            notify -i battery-low "Battery low (${cap}%)" "Consider plugging in soon."
-            warned=1
-        fi
-    else
-        warned=0
-        if [ "$ACTIVE" != "$PROFILE" ]; then
-            helper power auto-off && notify -i battery-good-charging "Charging" \
-                "Back to your ${PROFILE/-/ } power mode."
+    cap="" state=""
+    if read_battery; then
+        if [ "$state" = Discharging ]; then
+            if [ "$AUTO_SAVER" = 1 ] && (( cap <= SAVER_AT )) && \
+               [ "$PROFILE" != power-saver ] && [ "$ACTIVE" != power-saver ]; then
+                helper power auto-saver && notify -i battery-low "Battery saver on" \
+                    "Battery at ${cap}%. Performance is limited until you plug in."
+            fi
+            if (( cap <= 5 )) && (( warned < 2 )); then
+                notify -u critical -i battery-caution "Battery critically low (${cap}%)" \
+                    "Plug in now. Unsaved work may be lost."
+                warned=2
+            elif (( cap <= 15 )) && (( warned < 1 )); then
+                notify -i battery-low "Battery low (${cap}%)" "Consider plugging in soon."
+                warned=1
+            fi
+        else
+            warned=0
+            if [ "$ACTIVE" != "$PROFILE" ]; then
+                helper power auto-off && notify -i battery-good-charging "Charging" \
+                    "Back to your ${PROFILE/-/ } power mode."
+            fi
         fi
     fi
     sleep 60

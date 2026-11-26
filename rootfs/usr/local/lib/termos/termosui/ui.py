@@ -152,10 +152,14 @@ def button(text=None, on_click=None, *cls, icon_name=None, tip=None):
     b = Gtk.Button()
     inner = hbox(8)
     inner.set_halign(Gtk.Align.CENTER)
+    b.icon_widget = None
+    b.label_widget = None
     if icon_name:
-        inner.pack_start(icon(icon_name), False, False, 0)
+        b.icon_widget = icon(icon_name)
+        inner.pack_start(b.icon_widget, False, False, 0)
     if text is not None:
-        inner.pack_start(label(text), False, False, 0)
+        b.label_widget = label(text)
+        inner.pack_start(b.label_widget, False, False, 0)
     b.add(inner)
     name = tip or text
     if name:

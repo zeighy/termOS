@@ -155,6 +155,27 @@ class Settings(Gtk.ApplicationWindow):
             p.row("Sensor mounted upside down", ui.switch(dconf.get("SENSOR_OFFSET", "0") == "180", set_flip),
                   "A fix for tablets whose orientation sensor reads the wrong way round")
 
+        p.section("Night Light")
+        st = core.read_conf()
+        night_on = core.run("termos-nightlight", "status").returncode == 0
+        temps = [("4500", "Gentle (4500 K)"), ("4000", "Warm (4000 K)"),
+                 ("3400", "Warmer (3400 K)"), ("2800", "Candlelight (2800 K)")]
+        cur_temp = st.get("NIGHT_TEMP", "4000")
+        if cur_temp not in dict(temps):
+            cur_temp = "4000"
+
+        def set_night(on):
+            core.spawn("termos-nightlight", "on" if on else "off")
+
+        def set_temp(val):
+            core.write_conf("NIGHT_TEMP", val)
+            if night_sw.get_active():
+                core.spawn("termos-nightlight", "on", val)
+
+        night_sw = ui.switch(night_on, set_night)
+        p.row("Night Light", night_sw, "Warms the screen colours for low-light use")
+        p.row("Warmth", ui.combo(temps, cur_temp, set_temp))
+
         p.section("Desktop")
         self.setting_switch(p, "MAXIMIZE", True, "Open apps full-screen",
                             "Apps fill the screen and shrink when the on-screen keyboard appears",
@@ -229,23 +250,28 @@ class Settings(Gtk.ApplicationWindow):
         p.row("Main screen", ui.combo([(o["name"], f"{self.screen_title(o)} ({o['name']})") for o in outs],
                                       state["main"], on_main),
               "New apps open here")
+        return lambda: smap.set_screens(current(), state["main"])
 
     def screens_ui(self, p):
         outs = screens.connected()
         saved = screens.read_saved()
-        if len(outs) > 1:
-            self.arrangement_ui(p, outs)
+        refresh_map = self.arrangement_ui(p, outs) if len(outs) > 1 else None
         for out in outs:
             name = out.get("name", "?")
             title = self.screen_title(out)
             p.section(f"{title} ({name})")
-            self.screen_rows(p, out, name, saved.get(name, ("auto", "auto")))
+            self.screen_rows(p, out, name, saved.get(name, ("auto", "auto")), refresh_map)
         if not outs:
             p.section("Screens")
             p.note("Couldn't read screen information.")
 
-    def screen_rows(self, p, out, name, saved):
+    def screen_rows(self, p, out, name, saved, refresh_map=None):
         now = {"mode": screens.current_mode(out), "scale": float(out.get("scale", 1)), "busy": False}
+
+        def sync_layout():
+            if refresh_map:
+                core.run("termos-outputs", "layout")
+                refresh_map()
 
         modes, seen, preferred = [], set(), None
         for m in out.get("modes", []):
@@ -269,14 +295,17 @@ class Settings(Gtk.ApplicationWindow):
                 if now["busy"] or not new or new == now["mode"]:
                     return
                 r = core.run("wlr-randr", "--output", name, "--mode", new)
-                if r.returncode == 0 and self.confirm_keep():
-                    now["mode"] = new
-                    screens.save(name, mode="auto" if new == preferred else new)
-                    return
-                if r.returncode:
+                if r.returncode == 0:
+                    sync_layout()
+                    if self.confirm_keep():
+                        now["mode"] = new
+                        screens.save(name, mode="auto" if new == preferred else new)
+                        return
+                    if now["mode"]:
+                        core.run("wlr-randr", "--output", name, "--mode", now["mode"])
+                        sync_layout()
+                else:
                     self.failed("the resolution", r.stderr.strip())
-                elif now["mode"]:
-                    core.run("wlr-randr", "--output", name, "--mode", now["mode"])
                 now["busy"] = True
                 mode_combo.set_active_id(now["mode"])
                 now["busy"] = False
@@ -297,14 +326,17 @@ class Settings(Gtk.ApplicationWindow):
             value = auto if new == "auto" else float(new)
             same = abs(value - now["scale"]) < 0.01
             r = core.run("wlr-randr", "--output", name, "--scale", f"{value:g}")
-            if r.returncode == 0 and (same or self.confirm_keep()):
-                now["scale"], state["choice"] = value, new
-                screens.save(name, scale=new)
-                return
-            if r.returncode:
-                self.failed("the scale", r.stderr.strip())
-            else:
+            if r.returncode == 0:
+                if not same:
+                    sync_layout()
+                if same or self.confirm_keep():
+                    now["scale"], state["choice"] = value, new
+                    screens.save(name, scale=new)
+                    return
                 core.run("wlr-randr", "--output", name, "--scale", f"{now['scale']:g}")
+                sync_layout()
+            else:
+                self.failed("the scale", r.stderr.strip())
             now["busy"] = True
             scale_combo.set_active_id(state["choice"])
             now["busy"] = False
@@ -429,8 +461,43 @@ class Settings(Gtk.ApplicationWindow):
         p.add(widgets.PinChanger())
         p.note("After 5 wrong PINs each try has to wait longer. After 10, only your account "
                "password unlocks the device.")
-        p.note("The disk is not encrypted: the PIN stops someone using the device, but not "
-               "someone who takes the storage out or boots it from USB.")
+
+        p.section("Disk encryption")
+        encrypted, backing = core.disk_encrypted()
+        has_tpm = os.path.exists("/dev/tpmrm0")
+        if encrypted:
+            p.row("Disk encryption", ui.label("Encrypted (LUKS2)", "good", "row-label"),
+                  f"Storage ({backing or 'root'}) is protected if the device is lost or removed")
+            if has_tpm:
+                # what this start used; a change made with Manage… shows after a restart
+                tpm_on = "tpm2-device=auto" in core.slurp("/proc/cmdline")
+                p.row("TPM2 unlock", ui.label("On" if tpm_on else "Off", "good" if tpm_on else "sub", "row-label"),
+                      "The TPM2 chip unlocks the disk at boot; the passphrase is the backup" if tpm_on
+                      else "Every boot asks for the passphrase. Turn on TPM2 unlock with Manage…")
+            p.row("Keys and TPM2 unlock" if has_tpm else "Keys",
+                  ui.button("Manage…", lambda: core.spawn("foot", "-T", "Disk encryption", "-e", "termos-encrypt")),
+                  "Change the disk passphrase, add a recovery key, or turn TPM2 unlock on or off" if has_tpm
+                  else "Change the disk passphrase or add a recovery key")
+        else:
+            p.row("Disk encryption", ui.label("Not encrypted", "sub", "row-label"),
+                  "The PIN stops someone using the device, not someone who removes the storage or boots from USB")
+
+            def show_encrypt_guide():
+                ui.message(
+                    self,
+                    "Enable disk encryption (LUKS2)",
+                    "What enabling full-disk encryption changes:\n"
+                    "• Every boot asks for a disk passphrase before the PIN lock screen.\n"
+                    + ("• This device has a TPM2 chip: while encrypting you can let it unlock the disk "
+                       "at boot, so no keyboard is needed. The chip is tested first.\n" if has_tpm
+                       else "• A keyboard is needed at boot to type the passphrase.\n") +
+                    "• Forgetting the passphrase (without a recovery key) permanently locks out all data.\n\n"
+                    "To encrypt this installation without wiping it:\n"
+                    "1. Back up important files and plug into wall power.\n"
+                    "2. Boot the termOS live USB.\n"
+                    "3. Choose \"Encrypt an existing termOS install (LUKS2)\" from the menu.")
+            p.row("Encrypt this device", ui.button("How to encrypt…", show_encrypt_guide),
+                  "Done safely offline from the termOS live USB without reinstalling")
 
     # ---- Security keys ---------------------------------------------------
     def keys_page(self, p):
@@ -482,13 +549,43 @@ class Settings(Gtk.ApplicationWindow):
     # ---- Sound -----------------------------------------------------------
     def sound_page(self, p):
         p.section("Output")
+        sinks = core.audio_sinks()
+        cur_sink = core.default_sink()
+        if sinks:
+            if cur_sink and cur_sink not in dict(sinks):
+                sinks.append((cur_sink, cur_sink))
+
+            def pick_sink(name):
+                if name and name != cur_sink and core.set_default_sink(name):
+                    GLib.idle_add(lambda: (self.rebuild(), False)[1])
+            p.row("Output device", ui.combo(sinks, cur_sink or sinks[0][0], pick_sink),
+                  "Switch between speakers, headphones and external monitors")
         vol = core.get_volume()
-        if not vol:
+        if vol:
+            p.row("Volume", ui.slider(0, 100, min(vol[0], 100),
+                                      lambda v: ui.background(lambda: core.set_volume(v)), 170))
+            p.row("Mute", ui.switch(vol[1], lambda on: core.set_muted(on)))
+        elif not sinks:
             p.note("No sound output found.")
-            return
-        p.row("Volume", ui.slider(0, 100, min(vol[0], 100),
-                                  lambda v: ui.background(lambda: core.set_volume(v)), 170))
-        p.row("Mute", ui.switch(vol[1], lambda on: core.set_muted(on)))
+
+        p.section("Input (Microphone)")
+        sources = core.audio_sources()
+        cur_src = core.default_source()
+        if sources:
+            if cur_src and cur_src not in dict(sources):
+                sources.append((cur_src, cur_src))
+
+            def pick_source(name):
+                if name and name != cur_src and core.set_default_source(name):
+                    GLib.idle_add(lambda: (self.rebuild(), False)[1])
+            p.row("Input device", ui.combo(sources, cur_src or sources[0][0], pick_source))
+        mic = core.get_mic()
+        if mic:
+            p.row("Microphone volume", ui.slider(0, 100, min(mic[0], 100),
+                                                 lambda v: ui.background(lambda: core.set_mic_volume(v)), 170))
+            p.row("Mute microphone", ui.switch(mic[1], lambda on: core.set_mic_muted(on)))
+        elif not sources:
+            p.note("No microphone found.")
 
     # ---- Wallpaper -------------------------------------------------------
     def wallpaper_page(self, p):
@@ -591,12 +688,24 @@ class Settings(Gtk.ApplicationWindow):
         p.row("Another layout", line, "By its layout code")
 
         p.section("Touchpad")
+        self.setting_switch(p, "TAP_TO_CLICK", True, "Tap to click",
+                            "Tap the touchpad instead of pressing it",
+                            lambda: core.spawn("termos-apply-settings", "touchpad"))
+        self.setting_switch(p, "NATURAL_SCROLL", False, "Content follows your fingers",
+                            "Two-finger scrolling works like on a phone",
+                            lambda: core.spawn("termos-apply-settings", "touchpad"))
+        self.setting_switch(p, "DISABLE_WHILE_TYPING", True, "Disable while typing",
+                            "Prevents accidental palm taps when typing",
+                            lambda: core.spawn("termos-apply-settings", "touchpad"))
+        try:
+            spd = max(-10, min(10, round(float(st.get("POINTER_SPEED", "0.0")) * 10)))
+        except ValueError:
+            spd = 0
 
-        def set_scroll(on):
-            core.write_conf("NATURAL_SCROLL", "1" if on else "0")
+        def set_speed(val):
+            core.write_conf("POINTER_SPEED", f"{val / 10:.1f}")
             core.spawn("termos-apply-settings", "touchpad")
-        p.row("Content follows your fingers", ui.switch(st.get("NATURAL_SCROLL") == "1", set_scroll),
-              "Two-finger scrolling works like on a phone")
+        p.row("Pointer speed", ui.slider(-10, 10, spd, set_speed, 170))
 
         p.section("On-screen keyboard")
         p.row("On-screen keyboard", ui.button("Show / hide", lambda: core.spawn("termos-osk", "toggle")),

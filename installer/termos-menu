@@ -28,6 +28,7 @@ while :; do
 $wifi" "$H" "$W" 8 \
         rotate  "Turn the screen" \
         "${install_items[@]}" \
+        encrypt "Encrypt an existing termOS install (LUKS2)" \
         wifi    "Connect to Wi-Fi" \
         shell   "Open a terminal (type termos-menu to come back)" \
         off     "Power off" \
@@ -36,6 +37,7 @@ $wifi" "$H" "$W" 8 \
         rotate)  rotscr >/dev/null ;;
         wifi)    termos-wifi ;;
         install) clear; termos-install; pause ;;
+        encrypt) clear; termos-encrypt --live; pause ;;
         online)
             if ! termos-wifi --status >/dev/null && ! ip route get 1.1.1.1 &>/dev/null; then
                 wt --title "No internet" --yesno "There's no internet connection yet. Connect to Wi-Fi now?" 9 "$W" \

@@ -1,5 +1,5 @@
 # termOS: let admins use the Settings app's validated helper without a password
 %wheel ALL=(root) NOPASSWD: /usr/local/bin/termos-root-helper
-# and the lock screen's helper: it needs the PIN or account password on stdin for
-# anything it does, counts attempts, and only acts on the calling user
+# fallback for termos-pin (normally reached via termos-pin.socket, which does not go
+# through sudo/PAM so pam_faillock can never lock the user out of the lock screen)
 %wheel ALL=(root) NOPASSWD: /usr/local/bin/termos-pin

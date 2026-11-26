@@ -350,7 +350,8 @@ def options(name, meta=None):
     mine = meta.get(name, {})
     default_mosh = core.setting_on("SSH_MOSH", False)
     return {"mosh": mine.get("mosh", default_mosh), "tmux": mine.get("tmux", False),
-            "reconnect": mine.get("reconnect", True), "used": mine.get("used", 0)}
+            "reconnect": mine.get("reconnect", True), "tunnel": mine.get("tunnel", False),
+            "used": mine.get("used", 0)}
 
 
 def ago(stamp):
@@ -392,11 +393,11 @@ def split_port(server):
     return (m.group(1), m.group(2) or "") if m else (server, "")
 
 
-def save_remote(name, protocol, host, port, user):
-    """Write a Remmina profile for an RDP or VNC machine. Returns an error message, or None."""
+def save_remote(name, protocol, host, port, user, old_path=None):
+    """Write or update a Remmina profile for an RDP or VNC machine. Returns an error message, or None."""
     if not name or len(name) > 60 or not name.isprintable():
         return "Give it a name."
-    if any(m["name"].lower() == name.lower() for m in remote_desktops()):
+    if any(m["name"].lower() == name.lower() and m["path"] != old_path for m in remote_desktops()):
         return "There is already a remote desktop with that name."
     if not host or not re.fullmatch(r"[A-Za-z0-9:_\[][A-Za-z0-9._:%\[\]-]*", host):
         return "Enter the address, for example 192.168.1.10 or box.example.com."
@@ -406,6 +407,37 @@ def save_remote(name, protocol, host, port, user):
         return "That user name can't be used."
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
+    server = f"{host}:{port}" if port else host
+    updates = {"name": name, "protocol": protocol, "server": server, "username": user}
+    if old_path and os.path.isfile(old_path):
+        raw_lines = core.slurp(old_path).splitlines()
+        out, seen, in_sec = [], set(), False
+        for line in raw_lines:
+            stripped = line.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                if in_sec:
+                    for k, v in updates.items():
+                        if k not in seen:
+                            out.append(f"{k}={v}")
+                            seen.add(k)
+                in_sec = stripped.lower() == "[remmina]"
+                out.append(line)
+                continue
+            if in_sec and "=" in line:
+                k = line.split("=", 1)[0].strip().lower()
+                if k in updates:
+                    if k not in seen:
+                        out.append(f"{k}={updates[k]}")
+                        seen.add(k)
+                    continue
+            out.append(line)
+        if not any(ln.strip().lower() == "[remmina]" for ln in out):
+            out.insert(0, "[remmina]")
+        for k, v in updates.items():
+            if k not in seen:
+                out.append(f"{k}={v}")
+        core.write_atomic(old_path, "\n".join(out) + "\n", 0o600)
+        return None
     data_home = os.environ.get("XDG_DATA_HOME") or os.path.join(core.HOME, ".local", "share")
     folder = os.path.join(data_home, "remmina")
     os.makedirs(folder, 0o700, exist_ok=True)
@@ -416,9 +448,21 @@ def save_remote(name, protocol, host, port, user):
         path = os.path.join(folder, f"termos-{protocol.lower()}-{slug}-{n}.remmina")
         n += 1
     lines = ["[remmina]", f"name={name}", f"protocol={protocol}",
-             f"server={host}:{port}" if port else f"server={host}", f"username={user}"]
+             f"server={server}", f"username={user}"]
     core.write_atomic(path, "\n".join(lines) + "\n", 0o600)
     return None
+
+
+def delete_remote(path):
+    """Remove a saved Remmina profile."""
+    if not path or not path.endswith(".remmina"):
+        return False
+    try:
+        os.unlink(path)
+    except OSError:
+        return False
+    rename_meta(f"remote:{path}", None)
+    return True
 
 
 def tailscale_peers():
@@ -475,6 +519,12 @@ def probe(items):
 def connect_ssh(target, port=""):
     args = ["--port", str(port)] if port else []
     core.spawn("foot", "-T", f"SSH: {target}", "-e", "termos-connect", *args, "--", target)
+
+
+def browse_sftp(machine):
+    """Open an SSH host's files in Thunar via GVFS SFTP (uses ~/.ssh/config)."""
+    target = machine["name"] if isinstance(machine, dict) else str(machine)
+    core.spawn("thunar", f"sftp://{target}/")
 
 
 def connect(machine):

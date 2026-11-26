@@ -18,7 +18,7 @@ GUI=0
 confirm=()
 [ "$GUI" = 1 ] && confirm=(--noconfirm)
 
-STEPS=8; step=0
+STEPS=9; step=0
 say() { step=$((step + 1)); printf '\e[1;32m==>\e[0m [%d/%d] %s\n' "$step" "$STEPS" "$*"; }
 pause() {
     if [ "$GUI" = 0 ] && [ -t 0 ]; then read -rp "Press Enter to close" _ || true; fi
@@ -42,6 +42,52 @@ or replace this build with the GitHub version anyway:
     TERMOS_REPLACE_TEST=1 termos-update"
 fi
 
+verify_tree() {
+    local tree=$1 pub=/etc/termos/update.pub
+    local manifest="$tree/MANIFEST.sha256" sig="$tree/MANIFEST.sha256.sig"
+    local has_key=0
+
+    # Refuse symlinks or special files anywhere in the payload we install
+    if [ -n "$(find "$tree/packages.x86_64" "$tree/rootfs" -not -type f -not -type d 2>/dev/null)" ]; then
+        die "downloaded update contains unexpected symlinks or special files"
+    fi
+
+    # Always verify against the ALREADY-INSTALLED public key, never the downloaded one.
+    if [ -r "$pub" ] && awk '!/^[[:space:]]*(#|$)/ { found=1 } END { exit !found }' "$pub"; then
+        has_key=1
+    fi
+
+    if (( has_key )) && [ "${TERMOS_ALLOW_UNSIGNED:-}" != 1 ]; then
+        [ -f "$manifest" ] && [ -f "$sig" ] \
+            || die "update is not signed (missing MANIFEST.sha256 or MANIFEST.sha256.sig)"
+        ssh-keygen -Y verify -f "$pub" -I termos-update -n termos-update -s "$sig" < "$manifest" >/dev/null 2>&1 \
+            || die "update signature verification failed against $pub"
+    elif (( has_key )); then
+        echo "    WARNING: TERMOS_ALLOW_UNSIGNED=1 set; skipping signature check"
+    else
+        echo "    warning: no signing key in $pub (skipping signature check)"
+    fi
+
+    if [ -f "$manifest" ]; then
+        awk '
+            !/^[0-9a-f]{64}  (packages\.x86_64|rootfs\/.+)$/ { exit 1 }
+            /(^|\/)\.\.(\/|$)/ { exit 1 }
+            { print substr($0, 67) }
+        ' "$manifest" | LC_ALL=C sort > "$tmp/manifest-listed" \
+            || die "MANIFEST.sha256 contains an invalid entry"
+        (cd "$tree" && LC_ALL=C find packages.x86_64 rootfs -type f | LC_ALL=C sort) > "$tmp/manifest-actual"
+        cmp -s "$tmp/manifest-listed" "$tmp/manifest-actual" \
+            || die "downloaded files do not match MANIFEST.sha256"
+        (cd "$tree" && sha256sum -c --quiet MANIFEST.sha256) \
+            || die "file checksum verification failed"
+        if (( has_key )) && [ "${TERMOS_ALLOW_UNSIGNED:-}" != 1 ]; then
+            echo "    signature and checksums verified"
+        else
+            echo "    checksums verified"
+        fi
+    fi
+}
+
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
 say "Updating apps and system"
@@ -58,6 +104,9 @@ curl -fsSL --connect-timeout 20 "https://codeload.github.com/$TERMOS_REPO/tar.gz
     | tar -xz -C "$tmp/tree" --strip-components=1 || die "the download failed"
 src="$tmp/tree/rootfs"
 [ -d "$src" ] && [ -f "$tmp/tree/packages.x86_64" ] || die "download looks incomplete"
+
+say "Verifying update"
+verify_tree "$tmp/tree"
 
 say "What's new"
 old=$(sed -n 's/.*(\([0-9a-f]\{7,40\}\)).*/\1/p' /etc/termos/version 2>/dev/null || true)
@@ -85,21 +134,47 @@ else
 fi
 
 say "Installing system files"
+: > "$tmp/managed-files"
 while IFS= read -r -d '' f; do
     rel=${f#"$src"/}
     case $rel in
         etc/skel/*) continue ;;
         etc/sudoers.d/*)
-            sudo visudo -cqf "$f" >/dev/null || { echo "    skipping invalid $rel"; continue; }
-            sudo install -Dm440 "$f" "/$rel" ;;
+            # still recorded below when skipped, so the clean-up never deletes the installed copy
+            if sudo visudo -cqf "$f" >/dev/null; then
+                sudo install -Dm440 "$f" "/$rel"
+            else
+                echo "    skipping invalid $rel"
+            fi ;;
         usr/local/bin/*) sudo install -Dm755 "$f" "/$rel" ;;
         etc/systemd/logind.conf.d/termos.conf|etc/termos/power.conf)
             # keep the user's choices (power button, power mode)
-            [ -f "/$rel" ] && continue
-            sudo install -Dm644 "$f" "/$rel" ;;
+            [ -f "/$rel" ] || sudo install -Dm644 "$f" "/$rel" ;;
         *) sudo install -Dm644 "$f" "/$rel" ;;
     esac
+    printf '%s\n' "$rel" >> "$tmp/managed-files"
 done < <(find "$src" -type f -print0)
+LC_ALL=C sort -u -o "$tmp/managed-files" "$tmp/managed-files"
+
+# Remove system files that were shipped by an earlier termOS version and since removed
+if [ -r /var/lib/termos/managed-files ]; then
+    LC_ALL=C sort -u /var/lib/termos/managed-files > "$tmp/old-managed-files"
+    while IFS= read -r rel; do
+        [[ -n $rel && $rel != /* && ! $rel =~ (^|/)\.\.(/|$) ]] || continue
+        case $rel in
+            etc/skel/*|etc/termos/power.conf|etc/termos/source|etc/termos/version|\
+            etc/termos/console-rotation|etc/termos/session.env|etc/termos/update.pub|\
+            etc/systemd/logind.conf.d/termos.conf) continue ;;
+            etc/systemd/system/*)
+                sudo systemctl disable --now "${rel##*/}" 2>/dev/null || true ;;
+        esac
+        if [ -e "/$rel" ] || [ -L "/$rel" ]; then
+            sudo rm -f -- "/$rel"
+            echo "    removed obsolete /$rel"
+        fi
+    done < <(comm -23 "$tmp/old-managed-files" "$tmp/managed-files")
+fi
+sudo install -Dm644 "$tmp/managed-files" /var/lib/termos/managed-files
 
 say "Enabling system services"
 sudo /usr/local/bin/termos-system-setup --now || die "setting up the system services failed"
@@ -112,6 +187,7 @@ say "Updating your desktop configuration"
 backup="$HOME/.config/termos/backup-$(date +%Y%m%d-%H%M%S)"
 saved=0
 keep_copy() { install -Dm644 "$2" "$backup/$1"; saved=1; }
+: > "$tmp/managed-skel"
 while IFS= read -r -d '' f; do
     rel=${f#"$src/etc/skel/"}
     dest="$HOME/$rel"; base="/etc/skel/$rel"
@@ -137,7 +213,19 @@ while IFS= read -r -d '' f; do
         fi
     fi
     sudo install -Dm644 "$f" "$base"
+    printf '%s\n' "$rel" >> "$tmp/managed-skel"
 done < <(find "$src/etc/skel" -type f -print0)
+LC_ALL=C sort -u -o "$tmp/managed-skel" "$tmp/managed-skel"
+if [ -r /var/lib/termos/managed-skel ]; then
+    LC_ALL=C sort -u /var/lib/termos/managed-skel > "$tmp/old-managed-skel"
+    while IFS= read -r rel; do
+        [[ -n $rel && $rel != /* && ! $rel =~ (^|/)\.\.(/|$) ]] || continue
+        if [ -e "/etc/skel/$rel" ] || [ -L "/etc/skel/$rel" ]; then
+            sudo rm -f -- "/etc/skel/$rel"
+        fi
+    done < <(comm -23 "$tmp/old-managed-skel" "$tmp/managed-skel")
+fi
+sudo install -Dm644 "$tmp/managed-skel" /var/lib/termos/managed-skel
 [ "$saved" = 1 ] && echo "    previous versions saved in $backup"
 
 # last, so an update that failed halfway isn't reported as installed

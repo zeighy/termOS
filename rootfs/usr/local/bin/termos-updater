@@ -213,7 +213,7 @@ class Updater(Gtk.ApplicationWindow):
                                "10 minutes before it accepts a password.")
             why = reasons[-1] if reasons else (lines[-1] if lines else "It didn't start.")
             self.detail.set_text(f"{why}\nSee Details for more. It's safe to try again.")
-            self.start_btn.get_child().get_children()[0].set_text("Try again")
+            self.start_btn.label_widget.set_text("Try again")
             self.start_btn.show()
 
 

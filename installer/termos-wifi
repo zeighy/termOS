@@ -35,6 +35,31 @@ find_device() {
 connected_to() {   # the network name, if connected
     iwctl station "$1" show 2>/dev/null | strip | sed -n 's/^ *Connected network *\(.*[^ ]\) *$/\1/p'
 }
+connected_security() {   # iwd's reported security for the active connection (e.g. WPA3-Personal)
+    iwctl station "$1" show 2>/dev/null | strip | sed -n 's/^ *Security *\(.*[^ ]\) *$/\1/p'
+}
+iwd_profile_path() {     # /var/lib/iwd/<name>.psk (hex-encoded if SSID has special chars)
+    local ssid=$1
+    if [[ $ssid =~ ^[A-Za-z0-9\ _-]+$ ]]; then
+        printf '/var/lib/iwd/%s.psk' "$ssid"
+    else
+        printf '/var/lib/iwd/=%s.psk' "$(printf '%s' "$ssid" | od -An -tx1 -v | tr -d ' \n')"
+    fi
+}
+write_iwd_psk() {
+    local path=$1 psk=$2 hidden=$3
+    install -d -m700 /var/lib/iwd
+    (
+        umask 077
+        {
+            (( hidden )) && printf '[Settings]\nHidden=true\n\n'
+            # iwd unescapes values: a backslash must be doubled and a leading space written \s
+            psk=${psk//\\/\\\\}
+            [[ $psk == " "* ]] && psk="\\s${psk:1}"
+            printf '[Security]\nPassphrase=%s\n' "$psk"
+        } > "$path"
+    )
+}
 networks() {       # "security<TAB>name" per network, strongest first
     iwctl station "$1" scan &>/dev/null
     sleep 4
@@ -84,7 +109,7 @@ while :; do
     if [ "$ssid" = "+ hidden" ]; then
         ssid=$(wt --title "Wi-Fi" --inputbox "Name of the hidden network" 10 "$W") || continue
         [ -n "$ssid" ] || continue
-        sec=psk hidden=1
+        sec=hidden hidden=1
     else
         for n in "${nets[@]}"; do [ "${n#*$'\t'}" = "$ssid" ] && { sec=${n%%$'\t'*}; break; }; done
     fi
@@ -93,23 +118,35 @@ while :; do
         continue
     fi
     psk=""
-    if [ "$sec" != open ]; then
+    if [ "$sec" = hidden ]; then
+        psk=$(wt --title "Wi-Fi" --passwordbox "Password for $ssid (leave blank for an open network)" 10 "$W") || continue
+        [ -n "$psk" ] && sec=psk || sec=open
+    elif [ "$sec" != open ]; then
         psk=$(wt --title "Wi-Fi" --passwordbox "Password for $ssid" 10 "$W") || continue
     fi
     wt --title "Wi-Fi" --infobox "Connecting to $ssid..." 7 "$W"
+    profile=""
+    if [ -n "$psk" ]; then
+        # Write an iwd profile (0600) instead of passing --passphrase in argv
+        profile=$(iwd_profile_path "$ssid")
+        write_iwd_psk "$profile" "$psk" "$hidden"
+    fi
     if (( hidden )); then
-        iwctl --passphrase "$psk" station "$dev" connect-hidden "$ssid" &>/dev/null
-    elif [ -n "$psk" ]; then
-        iwctl --passphrase "$psk" station "$dev" connect "$ssid" &>/dev/null
+        iwctl station "$dev" connect-hidden "$ssid" </dev/null &>/dev/null
     else
-        iwctl station "$dev" connect "$ssid" &>/dev/null
+        iwctl station "$dev" connect "$ssid" </dev/null &>/dev/null
     fi
     for _ in $(seq 15); do [ "$(connected_to "$dev")" = "$ssid" ] && break; sleep 1; done
     if [ "$(connected_to "$dev")" = "$ssid" ]; then
+        # iwd lists WPA2 and WPA3 networks both as "psk"; NetworkManager needs to know which
+        if [ "$sec" != open ] && [[ $(connected_security "$dev") == WPA3-Personal* ]]; then
+            sec=sae
+        fi
         install -d -m700 "${STATE%/*}"
         ( umask 077; printf 'WIFI_SSID=%q\nWIFI_PSK=%q\nWIFI_SEC=%q\nWIFI_HIDDEN=%q\n' "$ssid" "$psk" "$sec" "$hidden" > "$STATE" )
         note "Connected to $ssid. The installed termOS will join it too."
         exit 0
     fi
+    [ -n "$profile" ] && rm -f "$profile"
     note "Could not connect to $ssid. Check the password and try again."
 done

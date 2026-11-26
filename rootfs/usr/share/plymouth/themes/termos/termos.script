@@ -1,4 +1,4 @@
-# termOS boot splash: centred logo, name, rotating spinner on the dark background.
+# termOS boot splash: centred logo, name, rotating spinner, and optional LUKS password prompt.
 Window.SetBackgroundTopColor(0.067, 0.067, 0.106);     # #11111b
 Window.SetBackgroundBottomColor(0.118, 0.118, 0.180);  # #1e1e2e
 
@@ -27,12 +27,55 @@ spin.sprite.SetX(sw / 2 - spin.base.GetWidth() / 2);
 spin.sprite.SetY(sh / 2 + 170 * k - 50 * k);
 spin.angle = 0;
 
+prompt.sprite = Sprite();
+bullets.sprite = Sprite();
+msg.sprite = Sprite();
+
 fun refresh() {
     spin.angle += 0.11;   # radians per frame (~50 fps)
     spin.sprite.SetImage(spin.base.Rotate(spin.angle));
 }
 Plymouth.SetRefreshFunction(refresh);
 
-# Boot messages / passwords are not expected on termOS; show nothing extra.
-fun message_callback(text) { }
+fun display_normal_callback() {
+    spin.sprite.SetOpacity(1);
+    prompt.sprite.SetOpacity(0);
+    bullets.sprite.SetOpacity(0);
+}
+Plymouth.SetDisplayNormalFunction(display_normal_callback);
+
+fun display_password_callback(text, count) {
+    spin.sprite.SetOpacity(0);
+    label = text;
+    if (!label || label == "") label = "Enter disk passphrase";
+    prompt.image = Image.Text(label, 0.804, 0.839, 0.957, 1, "Sans " + Math.Int(16 * k));
+    prompt.sprite.SetImage(prompt.image);
+    prompt.sprite.SetX(sw / 2 - prompt.image.GetWidth() / 2);
+    prompt.sprite.SetY(sh / 2 + 165 * k - 50 * k);
+    prompt.sprite.SetOpacity(1);
+
+    dots = "";
+    shown = count;
+    if (shown > 32) shown = 32;
+    for (i = 0; i < shown; i++) dots += "● ";
+    if (dots == "") dots = " ";
+    bullets.image = Image.Text(dots, 0.537, 0.706, 0.980, 1, "Sans " + Math.Int(18 * k));
+    bullets.sprite.SetImage(bullets.image);
+    bullets.sprite.SetX(sw / 2 - bullets.image.GetWidth() / 2);
+    bullets.sprite.SetY(sh / 2 + 205 * k - 50 * k);
+    bullets.sprite.SetOpacity(1);
+}
+Plymouth.SetDisplayPasswordFunction(display_password_callback);
+
+fun message_callback(text) {
+    if (!text || text == "") {
+        msg.sprite.SetOpacity(0);
+        return;
+    }
+    msg.image = Image.Text(text, 0.651, 0.678, 0.784, 1, "Sans " + Math.Int(13 * k));
+    msg.sprite.SetImage(msg.image);
+    msg.sprite.SetX(sw / 2 - msg.image.GetWidth() / 2);
+    msg.sprite.SetY(sh / 2 + 245 * k - 50 * k);
+    msg.sprite.SetOpacity(1);
+}
 Plymouth.SetMessageFunction(message_callback);

@@ -308,14 +308,75 @@ if (( TUI )); then
     loadkeys "$KEYMAP" &>/dev/null || true
 else
     KEYMAP=$(ask "Keyboard layout (us, uk, de, fr, ...)" "us")
+    loadkeys "$KEYMAP" &>/dev/null || true
 fi
 XKB=${KEYMAP%%-*}
 [[ $KEYMAP == uk ]] && XKB=gb
 
+# ---------------------------------------------------------------- optional disk encryption (LUKS2)
+ENCRYPT=0
+LUKS_PASS=""
+enc_note="Encrypt the disk with LUKS2?
+
+Protects all files, SSH keys, Wi-Fi passwords and browser sessions if the device is lost or stolen.
+
+What this changes:
+  * Every boot asks for a disk passphrase BEFORE the lock screen.
+  * A hardware keyboard is needed at boot, unless this device has a TPM2 chip
+    and you let it unlock the disk (asked next, if the chip works).
+  * If you forget the passphrase (and have no recovery key), all data is permanently unrecoverable."
+
+if (( TUI )); then
+    if wt --title "Disk encryption (optional)" --defaultno --yes-button "Encrypt disk" --no-button "Leave unencrypted" \
+          --yesno "$enc_note" 18 "$W"; then
+        ENCRYPT=1
+    fi
+else
+    echo
+    echo "$enc_note"
+    echo
+    [[ $(ask "Encrypt the disk with LUKS2? (y/n)" n) =~ ^[Yy] ]] && ENCRYPT=1
+fi
+if (( ENCRYPT )); then
+    while :; do
+        secret LUKS_PASS "Disk encryption passphrase (asked at every boot before the lock screen)"
+        secret LUKS_PASS2 "Repeat the disk encryption passphrase"
+        [[ -n $LUKS_PASS && $LUKS_PASS == "$LUKS_PASS2" ]] && break
+        note "The passphrases were empty or did not match. Try again." "Disk encryption"
+    done
+    unset LUKS_PASS2
+fi
+
+# optional TPM2 unlock: only offered when the chip passes a seal/unseal test
+TPM_UNLOCK=0
+TPM_PROBLEM=""
+if (( ENCRYPT )) && command -v termos-encrypt >/dev/null; then
+    tpm_rc=0
+    termos-encrypt --tpm2-available >/dev/null 2>&1 || tpm_rc=$?
+    if (( tpm_rc == 0 )); then
+        tpm_text="Unlock the disk automatically with TPM2?
+
+$(termos-encrypt --tpm2-note)"
+        if (( TUI )); then
+            size
+            wt --scrolltext --title "TPM2 unlock (optional)" --defaultno --yes-button "Use TPM2" \
+               --no-button "Type passphrase" --yesno "$tpm_text" "$H" "$W" && TPM_UNLOCK=1
+        else
+            echo
+            echo "$tpm_text"
+            echo
+            [[ $(ask "Unlock the disk with TPM2? (y/n)" n) =~ ^[Yy] ]] && TPM_UNLOCK=1
+        fi
+    elif (( tpm_rc == 2 )); then
+        note "This device has a TPM2 chip, but it failed a test, so TPM2 unlock is not offered.
+Every boot will ask for the disk passphrase." "TPM2 unlock"
+    fi
+fi
+
 # ---------------------------------------------------------------- Wi-Fi
 # Optional, and kept for the installed system (as a NetworkManager connection).
 # termos-wifi (live USB) connects and remembers the network in /run/termos/wifi.
-WIFI_SSID="" WIFI_PSK="" WIFI_HIDDEN=0
+WIFI_SSID="" WIFI_PSK="" WIFI_SEC="" WIFI_HIDDEN=0
 if (( TUI )) && command -v termos-wifi >/dev/null; then
     if ! termos-wifi --status >/dev/null 2>&1 \
        && wt --title "Wi-Fi" --yesno "Connect to Wi-Fi now? termOS will join the same network after installing. \
@@ -329,6 +390,9 @@ if (( TUI )) && command -v termos-wifi >/dev/null; then
 fi
 
 summary="Disk:       $DISK ($(lsblk -dno SIZE,MODEL "$DISK" | xargs))
+Encryption: $( if (( TPM_UNLOCK )); then echo "LUKS2, unlocked by TPM2 at boot (passphrase as backup)"
+               elif (( ENCRYPT )); then echo "LUKS2 (passphrase required at every boot)"
+               else echo "Off (can be enabled later from the live USB)"; fi )
 Device:     $HOST
 User:       $USERNAME (sudo; the desktop unlocks with the PIN)
 Time zone:  $TZONE      Keyboard: $KEYMAP${WIFI_SSID:+
@@ -377,12 +441,15 @@ check_packages || die "cannot install from here. Nothing was erased."
 say "Partitioning $DISK"
 umount -R "$MNT" 2>/dev/null || true
 swapoff -a 2>/dev/null || true
-# anything else still using the disk (a mounted partition, swap) would stop the
+# anything else still using the disk (a mounted partition, swap, dm-crypt) would stop the
 # kernel from reading the new partition table
-while read -r part; do
+while read -r part ptype; do
     umount -A -q "$part" 2>/dev/null || true
     swapoff "$part" 2>/dev/null || true
-done < <(lsblk -lnpo NAME "$DISK" | tail -n +2)
+    if [[ $ptype == crypt ]]; then
+        cryptsetup close "$part" 2>/dev/null || true
+    fi
+done < <(lsblk -lnpo NAME,TYPE "$DISK" | tail -n +2 | tac)
 # partition IDs about to be erased, to tidy the firmware's boot menu afterwards
 mapfile -t OLD_PARTS < <(lsblk -nro PARTUUID "$DISK" | grep -Ex '[0-9A-Fa-f-]{36}' || true)
 wipefs -af "$DISK" >/dev/null
@@ -414,8 +481,26 @@ fi
 
 say "Formatting"
 mkfs.fat -F32 -n EFI "$ESP" >/dev/null
-mkfs.ext4 -qF -L termOS "$ROOT"
-mount -o noatime "$ROOT" "$MNT"
+ROOT_DEV=$ROOT
+LUKS_UUID=""
+if (( ENCRYPT )); then
+    say "Setting up LUKS2 disk encryption"
+    printf '%s' "$LUKS_PASS" | cryptsetup luksFormat --type luks2 --pbkdf argon2id --batch-mode --key-file=- "$ROOT"
+    printf '%s' "$LUKS_PASS" | cryptsetup open --key-file=- "$ROOT" cryptroot
+    if (( TPM_UNLOCK )); then
+        # tests the chip, enrolls it, then checks the new slot really opens the disk
+        if ! printf '%s' "$LUKS_PASS" | termos-encrypt --enroll-tpm2 "$ROOT"; then
+            TPM_UNLOCK=0
+            TPM_PROBLEM="TPM2 unlock could not be set up, so every boot asks for the disk passphrase.
+You can try again in Settings > Lock screen > Disk encryption."
+        fi
+    fi
+    unset LUKS_PASS
+    ROOT_DEV=/dev/mapper/cryptroot
+    LUKS_UUID=$(blkid -c /dev/null -s UUID -o value "$ROOT")
+fi
+mkfs.ext4 -qF -L termOS "$ROOT_DEV"
+mount -o noatime "$ROOT_DEV" "$MNT"
 mount --mkdir -o fmask=0077,dmask=0077 "$ESP" "$MNT/boot"
 
 # ---------------------------------------------------------------- packages
@@ -437,6 +522,13 @@ cp -a "$ROOTFS/." "$MNT/"
 chmod 0440 "$MNT"/etc/sudoers.d/*
 cp "$TERMOS/version" "$MNT/etc/termos/version" 2>/dev/null || true
 chmod 0755 "$MNT"/usr/local/bin/*   # archiso resets the modes of files on the ISO
+# record shipped files so future termos-update runs can clean up removed ones
+install -d -m755 "$MNT/var/lib/termos"
+(cd "$ROOTFS" && LC_ALL=C find . -type f ! -path './etc/skel/*' | sed 's|^\./||' | LC_ALL=C sort) \
+    > "$MNT/var/lib/termos/managed-files"
+(cd "$ROOTFS/etc/skel" && LC_ALL=C find . -type f | sed 's|^\./||' | LC_ALL=C sort) \
+    > "$MNT/var/lib/termos/managed-skel"
+chmod 0644 "$MNT/var/lib/termos/managed-files" "$MNT/var/lib/termos/managed-skel"
 
 # pacman mirror for updates (installed system uses the normal Arch repos)
 if grep -q '^Server' /etc/pacman.d/mirrorlist 2>/dev/null; then
@@ -457,14 +549,18 @@ if [[ -n $WIFI_SSID ]]; then
     nm="$MNT/etc/NetworkManager/system-connections"
     install -d -m700 "$nm"
     ssid_bytes=$(printf '%s' "$WIFI_SSID" | od -An -tu1 -v | xargs | tr ' ' ';')
-    psk=${WIFI_PSK//\\/\\\\}
+    psk=${WIFI_PSK//$'\r'/}
+    psk=${psk//$'\n'/}
+    psk=${psk//\\/\\\\}
     [[ $psk == " "* ]] && psk="\\s${psk:1}"
+    key_mgmt=wpa-psk
+    [[ $WIFI_SEC == sae ]] && key_mgmt=sae
     {
         printf '[connection]\nid=%s\ntype=wifi\n\n[wifi]\nmode=infrastructure\nssid=%s;\n' \
             "termOS Wi-Fi" "$ssid_bytes"
         [[ $WIFI_HIDDEN == 1 ]] && printf 'hidden=true\n'
         printf '\n'
-        [[ -n $WIFI_PSK ]] && printf '[wifi-security]\nkey-mgmt=wpa-psk\npsk=%s\n\n' "$psk"
+        [[ -n $WIFI_PSK ]] && printf '[wifi-security]\nkey-mgmt=%s\npsk=%s\n\n' "$key_mgmt" "$psk"
         printf '[ipv4]\nmethod=auto\n\n[ipv6]\nmethod=auto\n'
     } > "$nm/termos-wifi.nmconnection"
     chmod 600 "$nm/termos-wifi.nmconnection"
@@ -487,14 +583,21 @@ EOF
 ln -sf "/usr/share/zoneinfo/$TZONE" "$MNT/etc/localtime"
 
 # fast boot: systemd-based initramfs, no fallback image
-cat > "$MNT/etc/mkinitcpio.conf.d/termos.conf" <<'EOF'
+if (( ENCRYPT )); then
+    cat > "$MNT/etc/mkinitcpio.conf.d/termos.conf" <<'EOF'
+HOOKS=(systemd keyboard autodetect microcode modconf kms plymouth sd-vconsole block sd-encrypt filesystems fsck)
+COMPRESSION="zstd"
+EOF
+else
+    cat > "$MNT/etc/mkinitcpio.conf.d/termos.conf" <<'EOF'
 HOOKS=(systemd autodetect microcode modconf kms plymouth keyboard sd-vconsole block filesystems fsck)
 COMPRESSION="zstd"
 EOF
+fi
 sed -i "s/^PRESETS=.*/PRESETS=('default')/" "$MNT/etc/mkinitcpio.d/linux.preset"
 rm -f "$MNT/boot/initramfs-linux-fallback.img"
 
-root_uuid=$(blkid -s UUID -o value "$ROOT")
+root_uuid=$(blkid -c /dev/null -s UUID -o value "$ROOT_DEV")
 
 arch-chroot "$MNT" /bin/bash -e <<EOF
 locale-gen >/dev/null
@@ -516,11 +619,18 @@ timeout 0
 console-mode keep
 editor no
 EOF
+if (( ENCRYPT )); then
+    luks_opts=discard
+    (( TPM_UNLOCK )) && luks_opts=tpm2-device=auto,discard   # falls back to the passphrase
+    root_opts="rd.luks.name=$LUKS_UUID=cryptroot rd.luks.options=$luks_opts root=/dev/mapper/cryptroot"
+else
+    root_opts="root=UUID=$root_uuid"
+fi
 cat > "$MNT/boot/loader/entries/termos.conf" <<EOF
 title   termOS
 linux   /vmlinuz-linux
 initrd  /initramfs-linux.img
-options root=UUID=$root_uuid rw quiet splash loglevel=3 rd.udev.log_level=3 systemd.show_status=auto nowatchdog
+options $root_opts rw quiet splash loglevel=3 rd.udev.log_level=3 systemd.show_status=auto nowatchdog
 EOF
 
 BOOT_PROBLEM=""
@@ -537,6 +647,9 @@ rm -rf "$MNT"/var/cache/pacman/pkg/*
 
 sync
 umount -R "$MNT"
+if (( ENCRYPT )); then
+    cryptsetup close cryptroot || true
+fi
 echo
 say "${c_bold}termOS is installed on $DISK as '$HOST'.${c_off}"
 if [[ -n $BOOT_PROBLEM ]]; then
@@ -546,6 +659,7 @@ It should still start from the disk's standard boot file. If it starts something
 put the internal disk first in the firmware's boot order.
 EOF
 fi
+[[ -n $TPM_PROBLEM ]] && printf '%sNOTE:%s %s\n' "$c_bold" "$c_off" "$TPM_PROBLEM"
 # the live system runs from the stick: pulling it out while Linux still runs crashes it
 done_text="Leave the USB stick in until the tablet is off. Then remove it and switch the tablet on.
 (Hold Space while it starts to see the boot menu.)"
@@ -554,7 +668,9 @@ if (( TUI )); then
     wt --title "termOS is installed" --yes-button "Power off" --no-button "Stay here" \
         --yesno "termOS is installed on $DISK as '$HOST'.${BOOT_PROBLEM:+
 
-WARNING: $BOOT_PROBLEM}
+WARNING: $BOOT_PROBLEM}${TPM_PROBLEM:+
+
+NOTE: $TPM_PROBLEM}
 
 $done_text" 16 "$W" && systemctl poweroff
     exit 0

@@ -1,0 +1,433 @@
+#!/bin/bash
+# termOS optional full-disk encryption (LUKS2).
+#
+#   termos-encrypt --status   print encryption status ("encrypted ..." or "unencrypted ...")
+#   termos-encrypt            on an installed system: manage LUKS2 keys / TPM2, or show
+#                             how to encrypt an unencrypted install safely from the live USB
+#   termos-encrypt --live     on the live USB: encrypt an existing unencrypted termOS
+#                             installation in-place (offline, while unmounted)
+#   termos-encrypt --tpm2-available        exit 0 if this device has a TPM2 chip
+#   termos-encrypt --tpm2-note             explain what TPM2 unlock means here
+#   termos-encrypt --enroll-tpm2 DEVICE    add TPM2 unlock to a LUKS2 device
+#                                          (root; current passphrase on stdin)
+set -euo pipefail
+
+c_bold=$'\e[1m'; c_red=$'\e[31m'; c_grn=$'\e[32m'; c_ylw=$'\e[33m'; c_off=$'\e[0m'
+say()  { printf '%s==>%s %s\n' "$c_grn$c_bold" "$c_off" "$*"; }
+warn() { printf '%sWARNING:%s %s\n' "$c_ylw$c_bold" "$c_off" "$*"; }
+die()  { printf '%sERROR:%s %s\n' "$c_red$c_bold" "$c_off" "$*" >&2; exit 1; }
+
+# Find the backing block device for / and whether it is LUKS-encrypted.
+detect_root() {
+    local src type backing
+    src=$(findmnt -no SOURCE / 2>/dev/null || true)
+    src=${src%%\[*}
+    [ -b "$src" ] || return 1
+    type=$(lsblk -no TYPE "$src" 2>/dev/null | head -n1)
+    if [ "$type" = crypt ]; then
+        backing=$(lsblk -snpo NAME,TYPE "$src" 2>/dev/null | awk '$2=="part"||$2=="disk"{print $1; exit}')
+        echo "encrypted ${backing:-$src} $src"
+        return 0
+    fi
+    echo "unencrypted $src"
+    return 1
+}
+
+show_changes_warning() {
+    cat <<EOF
+${c_bold}What enabling full-disk encryption (LUKS2) changes:${c_off}
+  1. Your root partition is encrypted in-place with LUKS2 (Argon2id).
+     All files, SSH keys, Wi-Fi passwords and browser sessions are protected
+     if the tablet is lost or its storage is removed.
+  2. Every boot asks for your disk passphrase ${c_bold}before${c_off} the PIN lock screen.
+  3. A hardware keyboard is required at boot to type the passphrase, unless
+     this device has a TPM2 chip and you turn on TPM2 unlock (offered while
+     encrypting, and later in Settings > Lock screen).
+  4. The initramfs adds the ${c_bold}sd-encrypt${c_off} hook, and /etc/fstab plus
+     /boot/loader/entries/termos.conf are updated to boot /dev/mapper/cryptroot.
+  5. ${c_red}${c_bold}If you forget the passphrase (and have no recovery key), your data
+     cannot be recovered.${c_off}
+EOF
+}
+
+# ---- TPM2 unlock ------------------------------------------------------------
+# Bound to PCR 7 (the Secure Boot state), so kernel and initramfs updates keep working.
+SB_VAR=/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-e7da2bd1e7de
+tpm2_present() { [ -e /dev/tpmrm0 ]; }
+secure_boot_on() { [ "$(od -An -tu1 -j4 -N1 "$SB_VAR" 2>/dev/null | tr -d ' ')" = 1 ]; }
+
+tpm2_note() {   # plain text: the installer shows it in a dialog
+    cat <<EOF
+This device has a TPM2 security chip. It can unlock the disk by itself at boot,
+so no keyboard is needed: the device starts straight to the PIN lock screen.
+
+  * The passphrase keeps working as a backup. Keep it somewhere safe.
+  * A firmware update or a Secure Boot change can stop TPM2 unlock working.
+    The boot then asks for the passphrase, and you can turn TPM2 unlock on
+    again in Settings > Lock screen.
+EOF
+    if secure_boot_on; then
+        echo "  * Secure Boot is on: the TPM only unlocks the disk for software it trusts."
+    else
+        cat <<EOF
+  * Secure Boot is OFF here, so anyone who starts this device from their own
+    USB stick can have the TPM unlock the disk too. TPM2 unlock then protects
+    storage taken out of the device, not a stolen device. If theft is the
+    worry, type the passphrase instead.
+EOF
+    fi
+}
+
+tpm2_enrolled() { cryptsetup luksDump "$1" 2>/dev/null | grep -q 'systemd-tpm2'; }
+
+# Before offering TPM2 unlock: seal a throwaway secret to the TPM with the same PCR 7
+# policy the disk key will use, and unseal it again. Needs root.
+tpm2_selftest() {
+    local dir out rc=1
+    tpm2_present || return 1
+    systemd-cryptenroll --tpm2-device=list >/dev/null 2>&1 || return 1
+    dir=$(mktemp -d /run/termos-tpm2test.XXXXXX) || return 1
+    if printf 'termos-tpm2-test' \
+         | systemd-creds encrypt --with-key=tpm2 --tpm2-pcrs=7 --name=termos-tpm2-test - "$dir/c" >/dev/null 2>&1 \
+       && out=$(systemd-creds decrypt --name=termos-tpm2-test "$dir/c" - 2>/dev/null) \
+       && [ "$out" = termos-tpm2-test ]; then
+        rc=0
+    fi
+    rm -rf "$dir"
+    return $rc
+}
+
+# After enrolling: open the volume (as a test, nothing is activated) with the TPM2 token alone
+TPM2_TOKEN_PLUGIN=/usr/lib/cryptsetup/libcryptsetup-token-systemd-tpm2.so
+tpm2_unlock_works() {
+    cryptsetup open --test-passphrase --token-only --token-type systemd-tpm2 "$1" </dev/null >/dev/null 2>&1
+}
+
+enroll_tpm2() {   # <luks device> [file holding the passphrase]; replaces an earlier TPM2 slot
+    local args=(--tpm2-device=auto --tpm2-pcrs=7 --wipe-slot=tpm2)
+    [ -n "${2:-}" ] && args+=(--unlock-key-file="$2")
+    systemd-cryptenroll "${args[@]}" "$1"
+}
+
+# test the chip, enroll, then prove the new slot opens the disk; undo it if not
+setup_tpm2() {   # <luks device> [file holding the passphrase]
+    say "Testing the TPM2 chip"
+    if ! tpm2_selftest; then
+        warn "The TPM2 chip failed a test (sealing and unsealing a test secret)."
+        warn "TPM2 unlock was not set up; the passphrase works as before."
+        return 1
+    fi
+    say "Adding TPM2 unlock"
+    if ! enroll_tpm2 "$@"; then
+        warn "TPM2 unlock could not be added; the passphrase works as before."
+        return 1
+    fi
+    if [ ! -e "$TPM2_TOKEN_PLUGIN" ]; then
+        warn "Could not test the new TPM2 slot ($TPM2_TOKEN_PLUGIN is missing)."
+        return 0
+    fi
+    say "Checking that the TPM2 chip can unlock the disk"
+    if ! tpm2_unlock_works "$1"; then
+        warn "The TPM2 chip could not unlock the disk in a test, so TPM2 unlock was"
+        warn "removed again. The passphrase works as before."
+        systemd-cryptenroll --wipe-slot=tpm2 "$1" >/dev/null 2>&1 || true
+        return 1
+    fi
+    say "TPM2 unlock works."
+}
+
+set_entry_tpm2() {   # <boot entry> on|off: tell systemd-cryptsetup to try the TPM first
+    local entry=$1
+    [ -f "$entry" ] || return 1
+    sed -i -E '/^options/{s/tpm2-device=auto,?//g; s/,( |$)/\1/g; s/ ?rd\.luks\.options=( |$)/\1/; s/ +$//}' "$entry"
+    if [ "$2" = on ]; then
+        if grep -q '^options.*rd\.luks\.options=' "$entry"; then
+            sed -i -E '/^options/s/rd\.luks\.options=/rd.luks.options=tpm2-device=auto,/' "$entry"
+        else
+            sed -i -E '/^options/s/$/ rd.luks.options=tpm2-device=auto/' "$entry"
+        fi
+    fi
+}
+
+# ---- one-shot commands --------------------------------------------------------
+case "${1:-}" in
+    -h|--help)
+        sed -n '2,12p' "$0"
+        exit 0 ;;
+    --status)
+        detect_root
+        exit $? ;;
+    --tpm2-available)   # 0 = chip works, 1 = no chip, 2 = chip failed the test, 3 = not root
+        tpm2_present || exit 1
+        [[ $EUID -eq 0 ]] || { echo "termos-encrypt: the TPM2 test needs root" >&2; exit 3; }
+        tpm2_selftest || exit 2
+        exit 0 ;;
+    --tpm2-note)
+        tpm2_note
+        exit 0 ;;
+    --enroll-tpm2)
+        [[ $EUID -eq 0 ]] || die "run as root"
+        [ -b "${2:-}" ] || die "usage: termos-encrypt --enroll-tpm2 DEVICE  (passphrase on stdin)"
+        tpm2_present || die "this device has no TPM2 chip"
+        keyf=$(mktemp /run/termos-luks.XXXXXX)   # 0600, in RAM
+        trap 'rm -f "$keyf"' EXIT
+        cat > "$keyf"
+        setup_tpm2 "$2" "$keyf"
+        exit $? ;;
+esac
+
+# ---- live USB: offline in-place encryption ----------------------------------
+live_encrypt() {
+    [[ $EUID -eq 0 ]] || die "run as root from the termOS live USB"
+    command -v cryptsetup >/dev/null || die "cryptsetup is not installed"
+    command -v resize2fs >/dev/null || die "resize2fs is not installed"
+
+    clear
+    printf '%sEncrypt an existing termOS installation (LUKS2)%s\n\n' "$c_bold" "$c_off"
+    show_changes_warning
+    cat <<EOF
+
+${c_ylw}${c_bold}Before continuing:${c_off}
+  * Back up important files first.
+  * Plug the device into wall power. Losing power during in-place encryption
+    can corrupt the filesystem.
+  * The partition must have at least 256 MB of free space.
+
+EOF
+
+    # Find unencrypted ext4 partitions (preferring ones labelled termOS)
+    local -a parts=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && parts+=("$line")
+    # raw mode: one space between columns, so empty LABEL/MOUNTPOINT columns stay in place
+    done < <(lsblk -rnpo NAME,TYPE,FSTYPE,MOUNTPOINT,SIZE,LABEL \
+             | awk -F'[ ]' '$2=="part" && $3=="ext4" && $4=="" {print $1 "|" $6 "|" $5}')
+    (( ${#parts[@]} )) || die "no unmounted ext4 partition found to encrypt"
+
+    echo "Available unmounted ext4 partitions:"
+    local i dev lbl sz
+    for i in "${!parts[@]}"; do
+        IFS='|' read -r dev lbl sz <<<"${parts[i]}"
+        printf '  %d) %s  (%s%s)\n' $((i + 1)) "$dev" "$sz" "${lbl:+, label: $lbl}"
+    done
+    echo
+    local pick
+    read -rp "Partition number to encrypt [1]: " pick
+    pick=${pick:-1}
+    [[ $pick =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= ${#parts[@]} )) || die "invalid selection"
+    IFS='|' read -r ROOT lbl sz <<<"${parts[pick - 1]}"
+
+    # Find the sibling EFI partition on the same disk
+    local parent ESP
+    parent=$(lsblk -no PKNAME "$ROOT" 2>/dev/null | head -n1)
+    [ -n "$parent" ] || die "could not determine parent disk for $ROOT"
+    ESP=$(lsblk -rnpo NAME,FSTYPE,PARTTYPE "/dev/$parent" \
+        | awk -F'[ ]' 'tolower($2)=="vfat" || tolower($3)=="c12a7328-f81f-11d2-ba4b-00a0c93ec93b" {print $1; exit}')
+    [ -b "${ESP:-}" ] || die "could not find the EFI partition on /dev/$parent"
+
+    # Quick sanity check that this actually looks like a termOS root
+    local MNT=/mnt
+    umount -R "$MNT" 2>/dev/null || true
+    mount -o ro "$ROOT" "$MNT" || die "could not mount $ROOT to inspect it"
+    if [ ! -f "$MNT/etc/mkinitcpio.conf.d/termos.conf" ]; then
+        umount "$MNT"
+        die "$ROOT does not look like a termOS root partition (missing /etc/mkinitcpio.conf.d/termos.conf)"
+    fi
+    if [ ! -f "$MNT/usr/lib/initcpio/install/sd-encrypt" ]; then
+        umount "$MNT"
+        die "$ROOT is missing the sd-encrypt initramfs hook; update termOS first"
+    fi
+    local avail_kb keymap
+    avail_kb=$(df -k --output=avail "$MNT" | tail -n1 | tr -d ' ')
+    keymap=$(sed -n 's/^KEYMAP=//p' "$MNT/etc/vconsole.conf" 2>/dev/null | tr -d '"' | head -n1)
+    umount "$MNT"
+    (( avail_kb >= 262144 )) || die "$ROOT has less than 256 MB free (${avail_kb} KB); free up space first"
+
+    echo
+    printf 'Target root: %s%s%s (%s)\n' "$c_bold" "$ROOT" "$c_off" "$sz"
+    printf 'EFI boot:    %s%s%s\n\n' "$c_bold" "$ESP" "$c_off"
+    local confirm
+    read -rp "Type ENCRYPT to encrypt $ROOT in-place: " confirm
+    [ "$confirm" = ENCRYPT ] || { echo "Cancelled. Nothing was changed."; exit 0; }
+
+    # the boot prompt uses the installed system's keyboard layout, so type the passphrase with it too
+    if [ -n "$keymap" ] && loadkeys "$keymap" &>/dev/null; then
+        echo "Keyboard layout for the passphrase: $keymap (the same one the boot prompt uses)"
+    fi
+    local p1 p2
+    while :; do
+        read -rsp "New disk encryption passphrase: " p1; echo
+        read -rsp "Repeat disk encryption passphrase: " p2; echo
+        [[ -n $p1 && $p1 == "$p2" ]] && break
+        echo "Passphrases were empty or did not match. Try again."
+    done
+    unset p2
+
+    local tpm=0 yn
+    if tpm2_present; then
+        if tpm2_selftest; then
+            echo
+            tpm2_note
+            echo
+            read -rp "Turn on TPM2 unlock? [y/N] " yn
+            [[ $yn =~ ^[Yy] ]] && tpm=1
+        else
+            warn "This device has a TPM2 chip, but it failed a test, so TPM2 unlock is not offered."
+        fi
+    fi
+
+    say "Checking filesystem on $ROOT"
+    e2fsck -f -y "$ROOT" || [ $? -le 1 ] || die "filesystem check failed; nothing was encrypted"
+
+    # Shrink ext4 by 64 MiB so the 32 MiB LUKS2 header fits with safe margin
+    local bs blocks new_blocks
+    bs=$(dumpe2fs -h "$ROOT" 2>/dev/null | awk -F: '/^Block size:/ {gsub(/ /,"",$2); print $2}')
+    blocks=$(dumpe2fs -h "$ROOT" 2>/dev/null | awk -F: '/^Block count:/ {gsub(/ /,"",$2); print $2}')
+    [[ $bs =~ ^[0-9]+$ && $blocks =~ ^[0-9]+$ ]] || die "could not read ext4 geometry"
+    new_blocks=$(( blocks - (64 * 1024 * 1024 / bs) ))
+    (( new_blocks > 0 )) || die "partition too small to shrink"
+
+    say "Making room for the LUKS2 header"
+    resize2fs "$ROOT" "$new_blocks" || die "could not shrink ext4; nothing was encrypted"
+
+    say "Encrypting $ROOT in-place (keep power connected — this takes several minutes)"
+    printf '%s' "$p1" | cryptsetup reencrypt --encrypt --type luks2 --pbkdf argon2id \
+        --reduce-device-size 32M --batch-mode --key-file=- "$ROOT" \
+        || die "in-place encryption failed"
+
+    say "Opening encrypted root and expanding filesystem"
+    printf '%s' "$p1" | cryptsetup open --key-file=- "$ROOT" cryptroot
+    if (( tpm )); then
+        if ! printf '%s' "$p1" | "$0" --enroll-tpm2 "$ROOT"; then
+            tpm=0
+            warn "Every boot will ask for the passphrase. You can try TPM2 unlock again"
+            warn "later in Settings > Lock screen."
+        fi
+    fi
+    unset p1
+    resize2fs /dev/mapper/cryptroot
+
+    local luks_uuid
+    luks_uuid=$(blkid -c /dev/null -s UUID -o value "$ROOT")
+
+    say "Updating initramfs and boot configuration"
+    mount -o noatime /dev/mapper/cryptroot "$MNT"
+    mount -o fmask=0077,dmask=0077 "$ESP" "$MNT/boot"
+
+    # Ensure cryptsetup is installed and sd-encrypt hook is enabled
+    if ! grep -qw sd-encrypt "$MNT/etc/mkinitcpio.conf.d/termos.conf"; then
+        sed -i 's/\bblock\b/block sd-encrypt/' "$MNT/etc/mkinitcpio.conf.d/termos.conf"
+    fi
+    # all keyboard drivers (not only the ones attached right now), so a detachable keyboard
+    # can type the passphrase even if it was off when the initramfs was built
+    sed -i -E '/^HOOKS=/{s/ keyboard\b//; s/\(systemd /(systemd keyboard /}' "$MNT/etc/mkinitcpio.conf.d/termos.conf"
+    # Point /etc/fstab root entry at /dev/mapper/cryptroot (keep UUID intact too; cryptroot works with both)
+    sed -i -E "s|^UUID=[^[:space:]]+([[:space:]]+/[[:space:]])|/dev/mapper/cryptroot\1|" "$MNT/etc/fstab"
+
+    local entry="$MNT/boot/loader/entries/termos.conf"
+    if [ -f "$entry" ]; then
+        sed -i -E "s|root=UUID=[^[:space:]]+|rd.luks.name=${luks_uuid}=cryptroot rd.luks.options=discard root=/dev/mapper/cryptroot|" "$entry"
+        (( tpm )) && set_entry_tpm2 "$entry" on
+    fi
+
+    arch-chroot "$MNT" mkinitcpio -P
+    sync
+    umount -R "$MNT"
+    cryptsetup close cryptroot
+
+    echo
+    say "${c_bold}$ROOT is now encrypted with LUKS2.${c_off}"
+    echo "Power off, remove the USB stick, and switch the device on."
+    if (( tpm )); then
+        echo "The TPM2 chip unlocks the disk at boot; the passphrase stays as a backup."
+    else
+        echo "You will be asked for the disk passphrase on every boot before the lock screen."
+    fi
+    echo "After booting, add a recovery key in Settings > Lock screen > Disk encryption."
+    exit 0
+}
+
+if [ "${1:-}" = --live ]; then
+    live_encrypt
+fi
+
+# ---- installed system -------------------------------------------------------
+status_line=$(detect_root || true)
+read -r state backing mapper <<<"$status_line"
+
+if [ "$state" != encrypted ]; then
+    printf '%sDisk encryption status: NOT encrypted%s (%s)\n\n' "$c_bold" "$c_off" "${backing:-unknown}"
+    show_changes_warning
+    cat <<EOF
+
+${c_bold}How to encrypt this installation safely:${c_off}
+  A running root filesystem cannot be safely encrypted while mounted.
+  To encrypt this device without reinstalling:
+    1. Back up your important files and plug in the charger.
+    2. Boot from the termOS live USB.
+    3. Choose ${c_bold}"Encrypt an existing termOS install (LUKS2)"${c_off} from the menu
+       (or run ${c_bold}termos-encrypt --live${c_off} in the live USB terminal).
+EOF
+    exit 0
+fi
+
+# Already encrypted: manage passphrase, recovery key, and optional TPM2 unlock
+if [[ $EUID -ne 0 ]]; then
+    exec sudo "$0" "$@"
+fi
+
+entry=/boot/loader/entries/termos.conf
+while :; do
+    echo
+    printf '%sDisk encryption: LUKS2 active%s (%s -> %s)\n\n' "$c_bold" "$c_off" "$backing" "$mapper"
+    tpm_on=0
+    if tpm2_present; then
+        tpm2_enrolled "$backing" && tpm_on=1
+        if (( tpm_on )); then
+            echo "  TPM2 unlock: ON (the device starts without the passphrase)"
+        else
+            echo "  TPM2 unlock: off (every boot asks for the passphrase)"
+        fi
+        echo
+    fi
+    echo "  1) Change disk passphrase"
+    echo "  2) Add a recovery key (recommended backup if you forget the passphrase)"
+    if tpm2_present; then
+        if (( tpm_on )); then
+            echo "  3) Turn off TPM2 unlock (ask for the passphrase at every boot)"
+        else
+            echo "  3) Turn on TPM2 unlock (start without typing the passphrase)"
+        fi
+    fi
+    echo "  q) Quit"
+    echo
+    read -rp "Choice: " ch
+    case "$ch" in
+        1)
+            cryptsetup luksChangeKey "$backing" || true ;;
+        2)
+            echo "Write down or print the recovery key shown below and store it safely."
+            systemd-cryptenroll --recovery-key "$backing" || true ;;
+        3)
+            tpm2_present || continue
+            if (( tpm_on )); then
+                if systemd-cryptenroll --wipe-slot=tpm2 "$backing"; then
+                    set_entry_tpm2 "$entry" off || true
+                    say "TPM2 unlock is off. Every boot asks for the disk passphrase again."
+                fi
+                continue
+            fi
+            echo
+            tpm2_note
+            echo
+            read -rp "Turn on TPM2 unlock? [y/N] " yn
+            [[ $yn =~ ^[Yy]$ ]] || continue
+            echo "Enter the current disk passphrase when asked."
+            if setup_tpm2 "$backing"; then
+                set_entry_tpm2 "$entry" on || warn "could not update $entry"
+                say "TPM2 unlock is on. It takes effect from the next start."
+            fi ;;
+        q|Q)
+            exit 0 ;;
+    esac
+done
